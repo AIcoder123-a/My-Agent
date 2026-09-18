@@ -1,3 +1,11 @@
+from tool_errors import (
+    tool_error_to_model,
+)
+from tool_logging import (
+    start_tool_log,
+    finish_tool_log,
+    error_tool_log,
+)
 from pathlib import Path
 
 from agents.decorators import tool
@@ -29,69 +37,93 @@ def safe_workspace_path(relative_path: str) -> Path:
     return target
 
 
-@tool
+@tool(
+    failure_error_function=tool_error_to_model
+)
 def list_files(
-    directory: str = "."
+    path: str = ".",
 ) -> str:
     """
-    查看 workspace 中指定目录里的文件和文件夹。
-
-    Args:
-        directory:
-            相对于 workspace 的目录。
-            默认为 "."，表示 workspace 根目录。
+    列出 workspace 中指定目录的文件。
     """
 
     print(
         f"\n[工具调用] "
-        f"list_files(directory={directory})"
+        f"list_files(path={path})"
     )
 
-    target = safe_workspace_path(
-        directory
+    start_time = start_tool_log(
+        "list_files",
+        {
+            "path": path,
+        },
     )
 
-    if not target.exists():
-        return "指定目录不存在。"
-
-    if not target.is_dir():
-        return "指定路径不是目录。"
-
-    items = []
-
-    for item in sorted(target.iterdir()):
-
-        relative = item.relative_to(
-            WORKSPACE_DIR
+    try:
+        target = safe_workspace_path(
+            path
         )
 
-        if item.is_dir():
-            items.append(
-                f"[目录] {relative}"
+        if not target.exists():
+            raise FileNotFoundError(
+                f"目录不存在：{path}"
             )
 
+        if not target.is_dir():
+            raise NotADirectoryError(
+                f"不是目录：{path}"
+            )
+
+        items = []
+
+        for item in sorted(
+            target.iterdir(),
+            key=lambda p: p.name.lower(),
+        ):
+            item_type = (
+                "目录"
+                if item.is_dir()
+                else "文件"
+            )
+
+            items.append(
+                f"[{item_type}] {item.name}"
+            )
+
+        if items:
+            result = "\n".join(items)
         else:
-            items.append(
-                f"[文件] {relative}"
-            )
+            result = "目录为空。"
 
-    if not items:
-        return "这个目录目前是空的。"
+        finish_tool_log(
+            "list_files",
+            start_time,
+            {
+                "path": path,
+                "item_count": len(items),
+            },
+        )
 
-    return "\n".join(items)
+        return result
+
+    except Exception as e:
+        error_tool_log(
+            "list_files",
+            start_time,
+            e,
+        )
+
+        raise
 
 
-@tool
+@tool(
+    failure_error_function=tool_error_to_model
+)
 def read_file(
-    path: str
+    path: str,
 ) -> str:
     """
-    读取 workspace 中指定文本文件的内容。
-
-    Args:
-        path:
-            相对于 workspace 的文件路径。
-            例如 "test.py" 或 "docs/readme.txt"。
+    读取 workspace 中的文本文件。
     """
 
     print(
@@ -99,31 +131,48 @@ def read_file(
         f"read_file(path={path})"
     )
 
-    target = safe_workspace_path(
-        path
+    start_time = start_tool_log(
+        "read_file",
+        {
+            "path": path,
+        },
     )
 
-    if not target.exists():
-        return "文件不存在。"
-
-    if not target.is_file():
-        return "指定路径不是文件。"
-
     try:
-
-        return target.read_text(
-            encoding="utf-8"
+        target = safe_workspace_path(
+            path
         )
 
-    except UnicodeDecodeError:
-
-        return (
-            "该文件不是 UTF-8 文本文件，"
-            "当前 read_file 无法读取。"
+        content = target.read_text(
+            encoding="utf-8",
         )
 
+        finish_tool_log(
+            "read_file",
+            start_time,
+            {
+                "path": path,
+                "content_length": len(content),
+            },
+        )
 
-@tool
+        return content
+
+    except Exception as e:
+        error_tool_log(
+            "read_file",
+            start_time,
+            e,
+        )
+
+        raise
+
+
+
+@tool(
+    needs_approval=True,
+    failure_error_function=tool_error_to_model,
+)
 def write_file(
     path: str,
     content: str,
@@ -146,20 +195,46 @@ def write_file(
         f"write_file(path={path})"
     )
 
-    target = safe_workspace_path(
-        path
+    start_time = start_tool_log(
+        "write_file",
+        {
+            "path": path,
+            "content_length": len(content),
+        },
     )
 
-    target.parent.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    try:
+        target = safe_workspace_path(
+            path
+        )
 
-    target.write_text(
-        content,
-        encoding="utf-8",
-    )
+        target.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
-    return (
-        f"文件已成功写入：{path}"
-    )
+        target.write_text(
+            content,
+            encoding="utf-8",
+        )
+
+        result = (
+            f"文件已成功写入：{path}"
+        )
+
+        finish_tool_log(
+            "write_file",
+            start_time,
+            result,
+        )
+
+        return result
+
+    except Exception as e:
+        error_tool_log(
+            "write_file",
+            start_time,
+            e,
+        )
+
+        raise

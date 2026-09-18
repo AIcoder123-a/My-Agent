@@ -1,22 +1,46 @@
+from tool_logging import (
+    start_tool_log,
+    finish_tool_log,
+    error_tool_log,
+)
 from agents.decorators import tool
-
-
 @tool
-def finish_task(summary: str) -> str:
+def finish_task(
+    summary: str,
+) -> str:
     """
-    当用户要求的整个任务已经真正完成时调用。
-
-    只有在所有必要的读取、分析、写入等操作都完成后，
-    才能调用此工具。
-
-    Args:
-        summary:
-            简要说明已经完成了什么，
-            包括生成或修改了哪些文件。
+    表示当前任务已经完成。
     """
 
     print(
         f"\n[任务完成] {summary}"
     )
 
-    return summary
+    start_time = start_tool_log(
+        "finish_task",
+        {
+            "summary_length": len(summary),
+        },
+    )
+
+    try:
+        result = summary
+
+        finish_tool_log(
+            "finish_task",
+            start_time,
+            {
+                "summary_length": len(summary),
+            },
+        )
+
+        return result
+
+    except Exception as e:
+        error_tool_log(
+            "finish_task",
+            start_time,
+            e,
+        )
+
+        raise
