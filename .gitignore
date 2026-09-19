@@ -1,12 +1,20 @@
 .env
-
-__pycache__/
-*.pyc
+.env.*
+!.env.example
 
 .idea/
 
-data/*.db
+__pycache__/
+*.py[cod]
+
+data/conversation_history.db
+data/current_session.txt
+data/tool_audit.jsonl
 data/notes.txt
 
+*.db
+*.sqlite
+*.sqlite3
+*.log
 workspace/*
 !workspace/.gitkeep
