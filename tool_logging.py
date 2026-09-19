@@ -180,3 +180,130 @@ def set_task_context(
     current_task_id.set(
         task_id
     )
+def sanitize_tool_arguments(
+    tool_name: str,
+    arguments,
+):
+    """
+    清理用于 Audit Log 的 Tool 参数。
+
+    UI 审批仍然可以显示真实参数，
+    但持久日志不保存敏感正文、Token、密码等内容。
+    """
+
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except Exception:
+            return {
+                "arguments_length": len(arguments),
+            }
+
+    if not isinstance(arguments, dict):
+        return {
+            "arguments_type": (
+                type(arguments).__name__
+            )
+        }
+
+    safe_arguments = {}
+
+    secret_words = {
+        "api_key",
+        "apikey",
+        "token",
+        "password",
+        "secret",
+        "authorization",
+    }
+
+    content_words = {
+        "content",
+        "text",
+        "body",
+        "note",
+        "message",
+    }
+
+    for key, value in arguments.items():
+
+        key_lower = str(key).lower()
+
+        if any(
+            word in key_lower
+            for word in secret_words
+        ):
+            safe_arguments[key] = (
+                "[REDACTED]"
+            )
+
+        elif key_lower in content_words:
+
+            safe_arguments[
+                f"{key}_length"
+            ] = len(str(value))
+
+        elif isinstance(
+            value,
+            (str, int, float, bool),
+        ):
+            value_text = str(value)
+
+            if len(value_text) > 300:
+                safe_arguments[key] = (
+                    value_text[:300]
+                    + "...[truncated]"
+                )
+            else:
+                safe_arguments[key] = value
+
+        else:
+            safe_arguments[key] = str(
+                value
+            )[:300]
+
+    return safe_arguments
+
+
+def read_audit_logs(
+    limit: int = 200,
+    task_id: str | None = None,
+) -> list[dict]:
+    """
+    读取最近的 Audit Log。
+
+    可以指定 task_id，只查看某一次任务。
+    """
+
+    if not LOG_FILE.exists():
+        return []
+
+    records = []
+
+    with LOG_FILE.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+
+        for line in file:
+
+            line = line.strip()
+
+            if not line:
+                continue
+
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if (
+                task_id
+                and record.get("task_id")
+                != task_id
+            ):
+                continue
+
+            records.append(record)
+
+    return records[-limit:]

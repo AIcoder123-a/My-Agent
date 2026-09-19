@@ -1,39 +1,27 @@
 import os
-
+from agents import OpenAIChatCompletionsModel, set_tracing_disabled
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from agents import (
-    OpenAIChatCompletionsModel,
+    OpenAIProvider,
     set_tracing_disabled,
 )
 
-from paths import BASE_DIR
-
-
-# 加载项目根目录中的 .env
-load_dotenv(BASE_DIR / ".env")
-
+load_dotenv()
 
 api_key = os.getenv("MODEL_API_KEY")
 base_url = os.getenv("MODEL_BASE_URL")
 model_name = os.getenv("MODEL_NAME")
 
-
 if not api_key:
-    raise ValueError(
-        "缺少 MODEL_API_KEY，请检查 .env"
-    )
+    raise ValueError("缺少 MODEL_API_KEY")
 
 if not base_url:
-    raise ValueError(
-        "缺少 MODEL_BASE_URL，请检查 .env"
-    )
+    raise ValueError("缺少 MODEL_BASE_URL")
 
 if not model_name:
-    raise ValueError(
-        "缺少 MODEL_NAME，请检查 .env"
-    )
+    raise ValueError("缺少 MODEL_NAME")
 
 
 client = AsyncOpenAI(
@@ -42,11 +30,20 @@ client = AsyncOpenAI(
 )
 
 
-model = OpenAIChatCompletionsModel(
-    model=model_name,
+model_provider = OpenAIProvider(
     openai_client=client,
+    use_responses=False,
+    buffer_streamed_tool_calls=True,
 )
 
 
-# 第三方模型暂时关闭 OpenAI tracing
+# personal_agent.py 仍然可以：
+# from config import model
+model = OpenAIChatCompletionsModel(
+    model=model_name,
+    openai_client=client,
+    buffer_streamed_tool_calls=True,
+)
+
+
 set_tracing_disabled(True)
