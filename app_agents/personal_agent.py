@@ -1,3 +1,5 @@
+from agent_tools.github_trending import github_trending
+from agent_tools.web_fetch import web_fetch
 from agents import Agent
 from agents.agent import StopAtTools
 
@@ -20,6 +22,7 @@ from agent_tools.file_tools import (
 from agent_tools.finish_tools import (
     finish_task,
 )
+from agent_tools.web_search import web_search
 
 
 personal_agent = Agent(
@@ -135,6 +138,86 @@ personal_agent = Agent(
 
     调用 finish_task 后，
     不再执行任何其他工具。
+    【联网搜索】
+
+    你拥有 web_search 工具，可以搜索互联网中的最新公开信息。
+
+    以下情况应优先使用 web_search：
+    - 用户明确要求联网、搜索、查询网上资料；
+    - 问题依赖最新、近期或可能变化的信息；
+    - 新闻、版本、发布、更新、当前状态等时效性内容；
+    - 你无法可靠确认某个外部事实，需要查询来源；
+    - 用户要求提供网页来源或链接。
+
+    以下情况通常不需要联网：
+    - 普通计算；
+    - 当前对话已经提供了足够信息；
+    - 本地 workspace 文件任务；
+    - 与最新信息无关的稳定知识问题。
+
+    搜索要求：
+    - 搜索关键词应具体，不要只搜索一个过于宽泛的词。
+    - 普通知识资料使用 web 搜索。
+    - 新闻或近期事件可使用 news 搜索，并根据需要设置 freshness。
+    - 优先依据相关性高、可信度高的来源。
+    - 回答涉及搜索结果中的事实时，应保留对应 URL 来源。
+    - 不要虚构没有出现在搜索结果中的网页、标题或 URL。
+    - 如果搜索失败，可以调整关键词后再次搜索；仍然失败时应明确说明。
+    【网页正文核实】
+
+web_search 用于寻找候选来源。
+web_fetch 用于打开候选网页并读取正文。
+
+对于重要事实、版本号、发布日期、功能变化、政策、官方声明等，
+不要只依赖搜索结果摘要。
+
+推荐流程：
+
+1. 使用 web_search 查找候选来源。
+2. 优先选择一手或高可信来源。
+3. 使用 web_fetch 打开最重要的 1～3 个来源。
+4. 基于网页正文核实后再回答。
+
+来源优先级：
+
+1. 官方文档、官方 GitHub、官方公告、原始发布页面
+2. 原始论文、标准组织、项目仓库
+3. 权威媒体或专业技术媒体
+4. 普通技术博客
+5. 聚合站、转载站、SEO 页面
+
+如果一手来源与二手来源冲突，以一手来源为准，并说明冲突。
+
+对于“最新、最近、本周、今天、近期”等问题：
+先使用 get_current_time 确认当前日期，
+再生成包含正确年份或时间范围的搜索关键词。
+
+不要把搜索结果 snippet 当作完整网页正文。
+当事实重要时，应使用 web_fetch 核实正文。
+【GitHub 热门项目】
+
+当用户询问：
+- GitHub 当前热门项目
+- GitHub Trending
+- 今天最火的 GitHub 项目
+- 本周 / 本月热门仓库
+- 某种编程语言当前热门项目
+
+优先使用 github_trending，而不是先使用普通 web_search。
+
+时间范围：
+- 今天 / 当前 / 现在 → daily
+- 本周 → weekly
+- 本月 → monthly
+
+如果用户没有明确指定时间范围，默认使用 daily。
+
+github_trending 返回 GitHub 官方 Trending 数据。
+如果还需要深入解释某个仓库，再使用 web_fetch 打开该仓库，
+或使用 web_search 补充资料。
+
+不要用第三方“GitHub 热门项目汇总文章”
+替代 GitHub 官方 Trending 数据，除非官方页面获取失败。
     """,
 
     model=model,
@@ -148,6 +231,9 @@ personal_agent = Agent(
         read_file,
         write_file,
         finish_task,
+        web_search,
+        web_fetch,
+        github_trending,
     ],
 
     tool_use_behavior=StopAtTools(

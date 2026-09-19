@@ -1,4 +1,11 @@
+from context_manager import (
+    build_session_input_callback,
+    get_context_status,
+    get_compaction_plan,
+    maybe_compact_context,
+)
 import asyncio
+import json
 from collections.abc import Mapping
 from datetime import datetime
 from threading import RLock
@@ -16,6 +23,12 @@ from app_agents.personal_agent import (
 from memory import (
     load_or_create_session,
     create_new_session,
+    list_sessions as memory_list_sessions,
+    switch_session as memory_switch_session,
+    rename_session as memory_rename_session,
+    delete_session as memory_delete_session,
+    get_chat_history as memory_get_chat_history,
+    touch_session,
 )
 
 from tool_logging import (
@@ -25,14 +38,42 @@ from tool_logging import (
     sanitize_tool_arguments,
 )
 
+from agent_tools.web_search import (
+    begin_search_task,
+    activate_search_task,
+    end_search_task,
+    get_search_task_sources,
+)
+
+from app_settings import (
+    get_int_setting,
+)
+
+from mcp_manager import (
+    build_mcp_server,
+    list_mcp_servers,
+)
+
 
 # ============================================================
 # Runner 配置
 # ============================================================
 
-RUN_CONFIG = RunConfig(
-    tool_not_found_behavior="return_error_to_model",
-)
+def build_run_config(
+    session_id: str,
+) -> RunConfig:
+
+    return RunConfig(
+        tool_not_found_behavior=(
+            "return_error_to_model"
+        ),
+
+        session_input_callback=(
+            build_session_input_callback(
+                session_id
+            )
+        ),
+    )
 
 
 def now_text() -> str:
@@ -74,6 +115,101 @@ def raw_field(
     )
 
 
+def classify_tool_output(
+    tool_name: str,
+    output,
+) -> tuple[bool, str]:
+    """
+    判断 Tool Output 在“业务层”是否应视为失败。
+
+    SDK 层只要 Python Tool 正常 return，
+    就会产生正常的 tool_output 事件。
+
+    但某些 Tool 会使用结构化返回值表达业务失败，例如：
+
+        {
+            "ok": false,
+            "error": "WEB_SEARCH_ERROR: ..."
+        }
+
+    这种情况虽然 Tool 函数本身没有抛异常，
+    GUI / Streaming 仍应显示为 tool_failed。
+
+    Returns:
+        (is_error, display_output)
+    """
+
+    output_text = str(
+        output
+        if output is not None
+        else ""
+    )
+
+    stripped = output_text.strip()
+
+    # --------------------------------------------------------
+    # 通用旧错误格式
+    # --------------------------------------------------------
+
+    if stripped.startswith(
+        "TOOL_ERROR:"
+    ):
+        return True, output_text
+
+    # --------------------------------------------------------
+    # Web Search 结构化业务结果
+    # --------------------------------------------------------
+
+    if tool_name in {
+        "web_search",
+        "web_fetch",
+        "github_trending",
+    }:
+
+        try:
+            payload = json.loads(
+                stripped
+            )
+        except (
+            json.JSONDecodeError,
+            TypeError,
+        ):
+            payload = None
+
+        if isinstance(
+            payload,
+            dict,
+        ):
+
+            if payload.get("ok") is False:
+
+                if tool_name == "web_search":
+                    default_error = (
+                        "WEB_SEARCH_ERROR: 联网搜索失败。"
+                    )
+                elif tool_name == "web_fetch":
+                    default_error = (
+                        "WEB_FETCH_ERROR: 网页读取失败。"
+                    )
+                else:
+                    default_error = (
+                        "GITHUB_TRENDING_ERROR: "
+                        "GitHub 热门数据读取失败。"
+                    )
+
+                error_text = str(
+                    payload.get("error")
+                    or default_error
+                ).strip()
+
+                return (
+                    True,
+                    error_text,
+                )
+
+    return False, output_text
+
+
 class AgentService:
     """
     Agent 统一运行服务。
@@ -110,6 +246,35 @@ class AgentService:
 
         self.running = False
 
+        # 当前 Task 的 MCP Server 对象。
+        #
+        # Server 配置只在新 Task 开始时快照一次。
+        # HITL 暂停时会断开连接，但保留这些对象；
+        # 审批恢复时再重新 connect。
+        self.mcp_servers = []
+
+        # 避免 MCP 工具和内置 FunctionTool 重名。
+        # 例如 Filesystem MCP 也有 read_file / write_file。
+        current_mcp_config = getattr(
+            personal_agent,
+            "mcp_config",
+            {},
+        )
+
+        if not isinstance(
+            current_mcp_config,
+            dict,
+        ):
+            current_mcp_config = {}
+
+        personal_agent.mcp_config = {
+            **current_mcp_config,
+            "include_server_in_tool_names":
+                True,
+        }
+
+        personal_agent.mcp_servers = []
+
         self.lock = RLock()
 
     # ========================================================
@@ -125,6 +290,17 @@ class AgentService:
     ) -> str | None:
 
         return self.task_id
+    def get_context_status(
+        self,
+    ) -> dict:
+        """
+        返回当前 Conversation 的
+        Context 状态。
+        """
+
+        return get_context_status(
+            self.session_id
+        )
 
     def new_session(self) -> str:
         """
@@ -148,7 +324,265 @@ class AgentService:
             self.running = False
 
             return self.session_id
+    # =====================================
+    # Conversation / Context 管理
+    # =====================================
 
+    def list_conversations(self):
+        """
+        返回历史会话列表。
+        """
+
+        return memory_list_sessions()
+
+
+    async def get_current_chat_history(self):
+        """
+        获取当前 Session 的聊天历史，
+        转换为 GUI Chatbot 可直接使用的格式。
+        """
+
+        return await memory_get_chat_history(
+            self.session_id
+        )
+
+
+    async def switch_conversation(
+        self,
+        session_id: str,
+    ) -> dict:
+        """
+        切换到一个历史 Session。
+        """
+
+        with self.lock:
+
+            if self.running:
+
+                raise RuntimeError(
+                    "当前任务正在运行，"
+                    "不能切换会话。"
+                )
+
+            if self.pending_state is not None:
+
+                raise RuntimeError(
+                    "当前任务正在等待人工审批，"
+                    "请先完成审批再切换会话。"
+                )
+
+            old_session = self.session
+
+            new_session, new_session_id = (
+                memory_switch_session(
+                    session_id
+                )
+            )
+
+            self.session = new_session
+            self.session_id = new_session_id
+
+            self.task_id = None
+            self.pending_state = None
+            self.pending_interruptions = []
+            self.active_calls = {}
+            self.running = False
+
+        # 旧 SQLiteSession 不再使用，关闭连接。
+        try:
+            old_session.close()
+        except Exception:
+            pass
+
+        history = await memory_get_chat_history(
+            new_session_id
+        )
+
+        return {
+            "session_id": new_session_id,
+            "history": history,
+        }
+
+
+    def rename_current_conversation(
+        self,
+        title: str,
+    ) -> str:
+        """
+        修改当前会话名称。
+        """
+
+        if self.running:
+
+            raise RuntimeError(
+                "当前任务正在运行，"
+                "暂时不能重命名会话。"
+            )
+
+        new_title = memory_rename_session(
+            self.session_id,
+            title,
+        )
+
+        return new_title
+
+    async def delete_conversation(
+            self,
+            session_id: str,
+    ) -> dict:
+        """
+        删除指定 Conversation。
+
+        如果删除当前会话：
+        1. 优先切换到最近的其他历史会话
+        2. 如果已经没有其他会话，才创建新会话
+        """
+
+        session_id = (
+                session_id or ""
+        ).strip()
+
+        if not session_id:
+            raise ValueError(
+                "Session ID 不能为空。"
+            )
+
+        # =====================================
+        # 状态检查
+        # =====================================
+
+        with self.lock:
+
+            if self.running:
+                raise RuntimeError(
+                    "当前任务正在运行，"
+                    "不能删除会话。"
+                )
+
+            if self.pending_state is not None:
+                raise RuntimeError(
+                    "当前任务正在等待人工审批，"
+                    "请先完成审批再删除会话。"
+                )
+
+            deleting_current = (
+                    session_id
+                    == self.session_id
+            )
+
+            old_session = (
+                self.session
+                if deleting_current
+                else None
+            )
+
+        # =====================================
+        # 删除当前 Session 前先释放连接
+        # =====================================
+
+        if (
+                deleting_current
+                and old_session is not None
+        ):
+
+            try:
+                old_session.close()
+            except Exception:
+                pass
+
+        # =====================================
+        # 真正删除
+        # =====================================
+
+        await memory_delete_session(
+            session_id
+        )
+
+        # =====================================
+        # 如果删除的是当前会话
+        # =====================================
+
+        if deleting_current:
+
+            remaining_sessions = (
+                memory_list_sessions()
+            )
+
+            # ---------------------------------
+            # 还有历史 Session：
+            # 自动切换到最近使用的那个
+            # ---------------------------------
+
+            if remaining_sessions:
+
+                target_session_id = (
+                    remaining_sessions[0][
+                        "session_id"
+                    ]
+                )
+
+                (
+                    new_session,
+                    new_session_id,
+                ) = memory_switch_session(
+                    target_session_id
+                )
+
+            # ---------------------------------
+            # 一个 Session 都没有：
+            # 才创建全新的空 Session
+            # ---------------------------------
+
+            else:
+
+                (
+                    new_session,
+                    new_session_id,
+                ) = create_new_session()
+
+            with self.lock:
+
+                self.session = new_session
+                self.session_id = (
+                    new_session_id
+                )
+
+                self.task_id = None
+                self.pending_state = None
+                self.pending_interruptions = []
+                self.active_calls = {}
+                self.running = False
+
+        # =====================================
+        # 删除的不是当前会话
+        # =====================================
+
+        else:
+
+            new_session_id = (
+                self.session_id
+            )
+
+        # =====================================
+        # 重新读取当前会话历史
+        # =====================================
+
+        history = (
+            await memory_get_chat_history(
+                new_session_id
+            )
+        )
+
+        return {
+            "session_id":
+                new_session_id,
+
+            "history":
+                history,
+
+            "sessions":
+                memory_list_sessions(),
+        }
     # ========================================================
     # CLI 兼容层
     # ========================================================
@@ -220,6 +654,307 @@ class AgentService:
     # 新任务：流式运行
     # ========================================================
 
+    # ========================================================
+    # MCP Runtime
+    # ========================================================
+
+    def _build_enabled_mcp_servers(
+        self,
+    ) -> list:
+        """
+        读取当前设置中“已启用”的 MCP Server，
+        为一个新 Task 构造独立的 Server 对象列表。
+
+        配置在 Task 开始时快照；
+        Task 中途修改设置不会影响正在运行的任务。
+        """
+
+        result = []
+
+        for config in list_mcp_servers():
+
+            if not config.get(
+                "enabled",
+                False,
+            ):
+                continue
+
+            result.append(
+                build_mcp_server(
+                    config
+                )
+            )
+
+        return result
+
+
+    async def _connect_mcp_servers(
+        self,
+        *,
+        reconnect: bool = False,
+    ):
+        """
+        连接当前 Task 的 MCP servers。
+
+        初次连接：
+        - 单个 Server 失败时丢弃该 Server；
+        - 其它可用 Server 仍继续参与 Task。
+
+        HITL 恢复重连：
+        - 如果之前已经可用的 Server 无法重新连接，
+          直接抛错，避免批准后的 MCP 操作在半失效状态下继续。
+        """
+
+        if not self.mcp_servers:
+
+            personal_agent.mcp_servers = []
+
+            return []
+
+        connected = []
+        events = []
+        failures = []
+
+        for server in list(
+            self.mcp_servers
+        ):
+
+            server_name = str(
+                getattr(
+                    server,
+                    "name",
+                    "MCP",
+                )
+                or "MCP"
+            )
+
+            events.append(
+                {
+                    "event": (
+                        "mcp_reconnecting"
+                        if reconnect
+                        else "mcp_connecting"
+                    ),
+                    "task_id":
+                        self.task_id,
+                    "server":
+                        server_name,
+                    "time":
+                        now_text(),
+                }
+            )
+
+            try:
+
+                await server.connect()
+
+                connected.append(
+                    server
+                )
+
+                write_log(
+                    {
+                        "event": (
+                            "mcp_reconnected"
+                            if reconnect
+                            else "mcp_connected"
+                        ),
+                        "server":
+                            server_name,
+                    }
+                )
+
+                events.append(
+                    {
+                        "event": (
+                            "mcp_reconnected"
+                            if reconnect
+                            else "mcp_connected"
+                        ),
+                        "task_id":
+                            self.task_id,
+                        "server":
+                            server_name,
+                        "time":
+                            now_text(),
+                    }
+                )
+
+            except Exception as error:
+
+                failures.append(
+                    (
+                        server_name,
+                        error,
+                    )
+                )
+
+                try:
+                    await server.cleanup()
+                except Exception:
+                    pass
+
+                write_log(
+                    {
+                        "event":
+                            "mcp_connection_failed",
+                        "server":
+                            server_name,
+                        "error_type":
+                            type(
+                                error
+                            ).__name__,
+                        "error":
+                            str(
+                                error
+                            )[:1000],
+                    }
+                )
+
+                events.append(
+                    {
+                        "event":
+                            "mcp_connection_failed",
+                        "task_id":
+                            self.task_id,
+                        "server":
+                            server_name,
+                        "error": (
+                            f"{type(error).__name__}: "
+                            f"{error}"
+                        ),
+                        "time":
+                            now_text(),
+                    }
+                )
+
+        if reconnect and failures:
+
+            # 恢复审批时，RunState 可能正等待调用某个 MCP Tool。
+            # 此时不能静默丢弃已失效的 Server。
+            personal_agent.mcp_servers = []
+
+            names = ", ".join(
+                name
+                for name, _
+                in failures
+            )
+
+            raise RuntimeError(
+                "MCP 审批恢复时重新连接失败："
+                f"{names}"
+            )
+
+        # 初始连接失败的 Server 从当前 Task 中移除。
+        self.mcp_servers = connected
+
+        personal_agent.mcp_servers = list(
+            connected
+        )
+
+        return events
+
+
+    async def _disconnect_mcp_servers(
+        self,
+        *,
+        keep_for_resume: bool,
+    ):
+        """
+        断开当前阶段的 MCP 连接。
+
+        keep_for_resume=True:
+            HITL 暂停。保留 Server 对象，
+            后续 approval callback 重新 connect。
+
+        keep_for_resume=False:
+            Task 真正结束。清空 Server 对象与 Agent 挂载。
+        """
+
+        errors = []
+
+        for server in reversed(
+            list(
+                self.mcp_servers
+            )
+        ):
+
+            server_name = str(
+                getattr(
+                    server,
+                    "name",
+                    "MCP",
+                )
+                or "MCP"
+            )
+
+            try:
+
+                await server.cleanup()
+
+                write_log(
+                    {
+                        "event":
+                            "mcp_disconnected",
+                        "server":
+                            server_name,
+                    }
+                )
+
+            except Exception as error:
+
+                errors.append(
+                    {
+                        "server":
+                            server_name,
+                        "error": (
+                            f"{type(error).__name__}: "
+                            f"{error}"
+                        ),
+                    }
+                )
+
+                try:
+
+                    write_log(
+                        {
+                            "event":
+                                "mcp_cleanup_failed",
+                            "server":
+                                server_name,
+                            "error_type":
+                                type(
+                                    error
+                                ).__name__,
+                            "error":
+                                str(
+                                    error
+                                )[:1000],
+                        }
+                    )
+
+                except Exception:
+                    pass
+
+        # 断开后不要让 Agent 在未连接状态下继续暴露 MCP Tools。
+        personal_agent.mcp_servers = []
+
+        if not keep_for_resume:
+
+            self.mcp_servers = []
+
+        return errors
+
+
+    def _reset_mcp_task_state(
+        self,
+    ) -> None:
+
+        self.mcp_servers = []
+
+        personal_agent.mcp_servers = []
+
+
     async def stream_task(
         self,
         user_input: str,
@@ -284,8 +1019,25 @@ class AgentService:
                     self.session_id
                 )
             )
+            task_id = self.task_id
+
+            touch_session(
+                self.session_id
+            )
 
             task_id = self.task_id
+
+            # 为当前 Task 创建独立的联网搜索预算。
+            # 普通任务最多 4 次；明显深度研究任务最多 6 次。
+            begin_search_task(
+                task_id,
+                user_input,
+            )
+
+            # 为当前 Task 快照“已启用”的 MCP 配置。
+            self.mcp_servers = (
+                self._build_enabled_mcp_servers()
+            )
 
         yield {
             "event": "task_started",
@@ -294,6 +1046,104 @@ class AgentService:
         }
 
         try:
+
+            # =====================================
+            # 长对话 Context 自动压缩
+            # =====================================
+
+            compaction_plan = (
+                get_compaction_plan(
+                    self.session_id
+                )
+            )
+
+            if compaction_plan[
+                "needed"
+            ]:
+
+                yield {
+                    "event":
+                        "context_compaction_started",
+
+                    "task_id":
+                        task_id,
+
+                    "total_items":
+                        compaction_plan[
+                            "total_items"
+                        ],
+
+                    "new_summary_items":
+                        compaction_plan[
+                            "new_summary_items"
+                        ],
+
+                    "time":
+                        now_text(),
+                }
+
+                compaction_result = (
+                    await maybe_compact_context(
+                        self.session_id
+                    )
+                )
+
+                if compaction_result[
+                    "compacted"
+                ]:
+
+                    yield {
+                        "event":
+                            "context_compaction_completed",
+
+                        "task_id":
+                            task_id,
+
+                        "summarized_items":
+                            compaction_result[
+                                "target_summarized_items"
+                            ],
+
+                        "summary_length":
+                            compaction_result[
+                                "summary_length"
+                            ],
+
+                        "time":
+                            now_text(),
+                    }
+
+                else:
+
+                    yield {
+                        "event":
+                            "context_compaction_failed",
+
+                        "task_id":
+                            task_id,
+
+                        "error":
+                            compaction_result.get(
+                                "error",
+                                "",
+                            ),
+
+                        "time":
+                            now_text(),
+                    }
+
+            # =====================================
+            # 连接当前 Task 的 MCP Servers
+            # =====================================
+
+            mcp_events = await (
+                self._connect_mcp_servers(
+                    reconnect=False
+                )
+            )
+
+            for mcp_event in mcp_events:
+                yield mcp_event
 
             result = None
 
@@ -323,11 +1173,41 @@ class AgentService:
                     "没有返回最终结果。"
                 )
 
-            yield self._finalize_result(
-                result
+            terminal = (
+                self._finalize_result(
+                    result
+                )
             )
 
+            # 如果进入 HITL，当前 async 阶段结束前先断开 MCP，
+            # 保留对象供审批恢复时重新连接。
+            if (
+                terminal.get("status")
+                == "approval_required"
+            ):
+
+                await self._disconnect_mcp_servers(
+                    keep_for_resume=True
+                )
+
+                yield terminal
+
+                return
+
+            # 正常结束：关闭 MCP 并清理整个 Task 状态。
+            await self._disconnect_mcp_servers(
+                keep_for_resume=False
+            )
+
+            self._clear_pending()
+
+            yield terminal
+
         except Exception as e:
+
+            await self._disconnect_mcp_servers(
+                keep_for_resume=False
+            )
 
             yield self._handle_failure(
                 e
@@ -376,6 +1256,12 @@ class AgentService:
         set_task_context(
             self.session_id,
             task_id,
+        )
+
+        # HITL 恢复发生在新的异步调用中，
+        # 重新激活原 Task 的搜索预算状态。
+        activate_search_task(
+            task_id
         )
 
         tool_name = (
@@ -466,6 +1352,17 @@ class AgentService:
 
         try:
 
+            # HITL 暂停时 MCP 已断开。
+            # 在同一个审批恢复 async 阶段重新连接。
+            mcp_events = await (
+                self._connect_mcp_servers(
+                    reconnect=True
+                )
+            )
+
+            for mcp_event in mcp_events:
+                yield mcp_event
+
             result = None
 
             async for event in (
@@ -494,11 +1391,38 @@ class AgentService:
                     "最终 Runner 结果。"
                 )
 
-            yield self._finalize_result(
-                result
+            terminal = (
+                self._finalize_result(
+                    result
+                )
             )
 
+            if (
+                terminal.get("status")
+                == "approval_required"
+            ):
+
+                await self._disconnect_mcp_servers(
+                    keep_for_resume=True
+                )
+
+                yield terminal
+
+                return
+
+            await self._disconnect_mcp_servers(
+                keep_for_resume=False
+            )
+
+            self._clear_pending()
+
+            yield terminal
+
         except Exception as e:
+
+            await self._disconnect_mcp_servers(
+                keep_for_resume=False
+            )
 
             yield self._handle_failure(
                 e
@@ -522,8 +1446,17 @@ class AgentService:
             personal_agent,
             runner_input,
             session=self.session,
-            max_turns=10,
-            run_config=RUN_CONFIG,
+            max_turns=(
+                get_int_setting(
+                    "agent.max_turns",
+                    10,
+                    minimum=3,
+                    maximum=40,
+                )
+            ),
+            run_config=build_run_config(
+                self.session_id
+            ),
         )
 
         # 注意：
@@ -798,16 +1731,12 @@ class AgentService:
                     "",
                 )
 
-                output_text = str(
-                    output
-                )
-
-                is_error = (
-                    output_text
-                    .strip()
-                    .startswith(
-                        "TOOL_ERROR:"
-                    )
+                (
+                    is_error,
+                    display_output,
+                ) = classify_tool_output(
+                    tool_name,
+                    output,
                 )
 
                 yield {
@@ -827,7 +1756,7 @@ class AgentService:
                         duration_ms
                     ),
                     "output": (
-                        output_text[:1000]
+                        display_output[:1000]
                     ),
                     "time": now_text(),
                 }
@@ -932,7 +1861,15 @@ class AgentService:
 
         task_id = self.task_id
 
-        self._clear_pending()
+        # 在清理 Task 搜索状态之前先保存 Sources，
+        # 这样 GUI / CLI 可以拿到本轮真实使用过的来源。
+        sources = (
+            get_search_task_sources(
+                task_id
+            )
+            if task_id
+            else []
+        )
 
         return {
             "status": "completed",
@@ -940,6 +1877,7 @@ class AgentService:
             "message": str(
                 final_output
             ),
+            "sources": sources,
             "time": now_text(),
         }
 
@@ -1031,11 +1969,23 @@ class AgentService:
         self,
     ) -> None:
 
+        task_id = self.task_id
+
         self.pending_state = None
 
         self.pending_interruptions = []
 
         self.active_calls = {}
+
+        # MCP 连接本身必须在 async caller 中 cleanup。
+        # 这里仅清空 Task 级引用。
+        self._reset_mcp_task_state()
+
+        # Task 真正结束时清理联网搜索预算与去重状态。
+        if task_id:
+            end_search_task(
+                task_id
+            )
 
         self.task_id = None
 
