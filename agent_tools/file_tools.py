@@ -143,9 +143,12 @@ def read_file(
             path
         )
 
-        content = target.read_text(
-            encoding="utf-8",
-        )
+        with target.open("r", encoding="utf-8") as stream:
+            content = stream.read(120001)
+        if len(content) > 120000:
+            content = content[:120000] + (
+                "\n\n[内容已截断。请使用 read_file_lines 按行阅读，或使用终端处理大文件。]"
+            )
 
         finish_tool_log(
             "read_file",

@@ -86,6 +86,39 @@ def now_text() -> str:
     )
 
 
+def _mcp_display_name(
+    server,
+) -> str:
+    """
+    MCP Server 的中文显示名。
+
+    SDK 内部使用 ASCII name 生成工具名，
+    但界面 / 审计日志应显示中文名。
+    """
+
+    display = str(
+        getattr(
+            server,
+            "display_name",
+            "",
+        )
+        or ""
+    ).strip()
+
+    if display:
+
+        return display
+
+    return str(
+        getattr(
+            server,
+            "name",
+            "MCP",
+        )
+        or "MCP"
+    )
+
+
 def raw_field(
     item,
     field_name: str,
@@ -155,6 +188,16 @@ def classify_tool_output(
         "TOOL_ERROR:"
     ):
         return True, output_text
+
+    if tool_name == "run_shell":
+        try:
+            payload = json.loads(stripped)
+            return (
+                payload.get("status") != "completed" or payload.get("exit_code") != 0,
+                output_text,
+            )
+        except (ValueError, AttributeError):
+            return True, output_text
 
     # --------------------------------------------------------
     # Web Search 结构化业务结果
@@ -246,6 +289,13 @@ class AgentService:
 
         self.running = False
 
+        # 用户主动请求停止当前 Task。
+        #
+        # 由 GUI “停止”按钮设置，
+        # stream_task 的事件循环在下一个
+        # 事件点安全退出。
+        self._cancel_requested = False
+
         # 当前 Task 的 MCP Server 对象。
         #
         # Server 配置只在新 Task 开始时快照一次。
@@ -276,6 +326,23 @@ class AgentService:
         personal_agent.mcp_servers = []
 
         self.lock = RLock()
+
+        # ------------------------------------------------
+        # MCP 连接池
+        #
+        # npx / uvx 这类 stdio Server 冷启动实测需要 20 秒以上，
+        # 如果每个 Task 都重新 connect，
+        # 用户每发一句话都要先干等 20 秒——表现就是"点了没反应"。
+        #
+        # 因此 Task 结束后保留连接，
+        # 只有在配置变化或连接出错时才重建。
+        # ------------------------------------------------
+
+        self._mcp_pool = []
+
+        self._mcp_pool_signature = (
+            None
+        )
 
     # ========================================================
     # 基础状态
@@ -309,6 +376,9 @@ class AgentService:
 
         with self.lock:
 
+            if self.running or self.pending_interruptions:
+                raise RuntimeError("请先停止当前任务或处理审批，再新建会话。")
+
             self.session, self.session_id = (
                 create_new_session()
             )
@@ -322,6 +392,14 @@ class AgentService:
             self.active_calls = {}
 
             self.running = False
+
+            self._cancel_requested = (
+                False
+            )
+
+            # 新会话不应继承上一个会话的
+            # MCP 连接与 Task 状态。
+            self._reset_mcp_task_state()
 
             return self.session_id
     # =====================================
@@ -688,6 +766,125 @@ class AgentService:
         return result
 
 
+    async def warmup_mcp_pool(
+        self,
+    ) -> None:
+        """
+        后台预热 MCP 连接池。
+
+        页面打开时就悄悄连好，
+        用户发第一句话时不必再等 npx 冷启动。
+        """
+
+        with self.lock:
+
+            if self._mcp_pool:
+                return
+
+            if self.running:
+                return
+
+            servers = (
+                self._build_enabled_mcp_servers()
+            )
+
+            if not servers:
+                return
+
+            self.mcp_servers = servers
+
+        try:
+
+            await self._connect_mcp_servers()
+
+        except Exception:
+
+            # 预热失败不影响正常使用：
+            # 真正发任务时会按正常流程重试并给出失败提示。
+            self._mcp_pool = []
+
+            self._mcp_pool_signature = (
+                None
+            )
+
+    def _mcp_config_signature(
+        self,
+    ) -> str:
+        """
+        当前「已启用」MCP 配置的指纹。
+
+        配置没变就复用已有连接；
+        配置一变（增删改、启停、改超时）指纹就变，
+        下次任务会重新连接。
+        """
+
+        import hashlib
+        import json
+
+        payload = [
+            config
+            for config in list_mcp_servers()
+            if config.get(
+                "enabled",
+                False,
+            )
+        ]
+
+        try:
+
+            raw = json.dumps(
+                payload,
+                sort_keys=True,
+                ensure_ascii=False,
+                default=str,
+            )
+
+        except Exception:
+
+            raw = repr(
+                payload
+            )
+
+        return (
+            hashlib.sha1(
+                raw.encode(
+                    "utf-8"
+                )
+            ).hexdigest()
+        )
+
+    async def reset_mcp_pool(
+        self,
+    ) -> None:
+        """
+        显式销毁连接池（MCP 配置变更时调用）。
+        """
+
+        servers = list(
+            self._mcp_pool
+        )
+
+        self._mcp_pool = []
+
+        self._mcp_pool_signature = (
+            None
+        )
+
+        self.mcp_servers = []
+
+        personal_agent.mcp_servers = (
+            []
+        )
+
+        for server in servers:
+
+            try:
+
+                await server.cleanup()
+
+            except Exception:
+                pass
+
     async def _connect_mcp_servers(
         self,
         *,
@@ -705,9 +902,54 @@ class AgentService:
           直接抛错，避免批准后的 MCP 操作在半失效状态下继续。
         """
 
+        signature = (
+            self._mcp_config_signature()
+        )
+
         if not self.mcp_servers:
 
             personal_agent.mcp_servers = []
+
+            self._mcp_pool = []
+
+            self._mcp_pool_signature = (
+                signature
+            )
+
+            return []
+
+        # ------------------------------------------------
+        # 复用已有连接
+        # ------------------------------------------------
+
+        if (
+            self._mcp_pool
+            and self._mcp_pool_signature
+            == signature
+            and all(
+                server
+                in self._mcp_pool
+                for server in (
+                    self.mcp_servers
+                )
+            )
+        ):
+
+            personal_agent.mcp_servers = (
+                list(
+                    self.mcp_servers
+                )
+            )
+
+            write_log(
+                {
+                    "event":
+                        "mcp_reused",
+                    "count": len(
+                        self.mcp_servers
+                    ),
+                }
+            )
 
             return []
 
@@ -719,34 +961,45 @@ class AgentService:
             self.mcp_servers
         ):
 
-            server_name = str(
-                getattr(
-                    server,
-                    "name",
-                    "MCP",
+            server_name = (
+                _mcp_display_name(
+                    server
                 )
-                or "MCP"
             )
 
-            events.append(
-                {
-                    "event": (
-                        "mcp_reconnecting"
-                        if reconnect
-                        else "mcp_connecting"
-                    ),
-                    "task_id":
-                        self.task_id,
-                    "server":
-                        server_name,
-                    "time":
-                        now_text(),
-                }
-            )
+            # npx / uvx 这类 stdio Server 在包缓存冷启动时
+            # 首次拉起经常超过默认超时，从而被误判为不可用。
+            # 初次连接允许重试一次；HITL 恢复时不做额外重试，
+            # 因为此时 RunState 已经在等待具体 Tool 的结果。
+            attempts = 1 if reconnect else 2
 
-            try:
+            error = None
+            connected_ok = False
 
-                await server.connect()
+            for attempt in range(attempts):
+
+                try:
+
+                    await server.connect()
+
+                    connected_ok = True
+
+                    break
+
+                except Exception as attempt_error:
+
+                    error = attempt_error
+
+                    try:
+                        await server.cleanup()
+                    except Exception:
+                        pass
+
+                    if attempt + 1 < attempts:
+
+                        await asyncio.sleep(1.5)
+
+            if connected_ok:
 
                 connected.append(
                     server
@@ -780,7 +1033,7 @@ class AgentService:
                     }
                 )
 
-            except Exception as error:
+            else:
 
                 failures.append(
                     (
@@ -852,6 +1105,15 @@ class AgentService:
             connected
         )
 
+        # 记录连接池，供后续 Task 复用。
+        self._mcp_pool = list(
+            connected
+        )
+
+        self._mcp_pool_signature = (
+            signature
+        )
+
         return events
 
 
@@ -879,13 +1141,10 @@ class AgentService:
             )
         ):
 
-            server_name = str(
-                getattr(
-                    server,
-                    "name",
-                    "MCP",
+            server_name = (
+                _mcp_display_name(
+                    server
                 )
-                or "MCP"
             )
 
             try:
@@ -1011,6 +1270,10 @@ class AgentService:
 
             self.running = True
 
+            self._cancel_requested = (
+                False
+            )
+
             # 新 Task 开始时清空旧 Tool Call 信息。
             self.active_calls = {}
 
@@ -1035,9 +1298,27 @@ class AgentService:
             )
 
             # 为当前 Task 快照“已启用”的 MCP 配置。
-            self.mcp_servers = (
-                self._build_enabled_mcp_servers()
+            # 配置没变就复用上一次已经连好的对象，
+            # 避免每句话都为 npx 冷启动付 20 秒。
+            signature = (
+                self._mcp_config_signature()
             )
+
+            if (
+                self._mcp_pool
+                and self._mcp_pool_signature
+                == signature
+            ):
+
+                self.mcp_servers = list(
+                    self._mcp_pool
+                )
+
+            else:
+
+                self.mcp_servers = (
+                    self._build_enabled_mcp_servers()
+                )
 
         yield {
             "event": "task_started",
@@ -1134,7 +1415,29 @@ class AgentService:
 
             # =====================================
             # 连接当前 Task 的 MCP Servers
+            #
+            # 先发出“正在连接”事件再 await：
+            # npx 冷启动要 20 秒以上，
+            # 如果等 connect 返回才通知界面，
+            # 这段时间界面是静止的，看起来就像卡死。
             # =====================================
+
+            for server in list(
+                self.mcp_servers
+            ):
+
+                yield {
+                    "event":
+                        "mcp_connecting",
+                    "task_id":
+                        task_id,
+                    "server":
+                        _mcp_display_name(
+                            server
+                        ),
+                    "time":
+                        now_text(),
+                }
 
             mcp_events = await (
                 self._connect_mcp_servers(
@@ -1153,6 +1456,24 @@ class AgentService:
                 )
             ):
 
+                # 用户点击“停止任务”
+                if (
+                    self._cancel_requested
+                ):
+
+                    yield {
+                        "event":
+                            "task_cancelled",
+                        "task_id":
+                            task_id,
+                        "time":
+                            now_text(),
+                    }
+
+                    result = None
+
+                    break
+
                 if (
                     event.get("event")
                     == "_runner_finished"
@@ -1165,6 +1486,36 @@ class AgentService:
                 else:
 
                     yield event
+
+            if (
+                result is None
+                and self._cancel_requested
+            ):
+
+                # 用户主动停止。
+                # MCP 连接保留在池里复用：
+                # 停止只结束当前 Task，不代表下次要重新冷启动。
+
+                self._clear_pending()
+
+                self._cancel_requested = (
+                    False
+                )
+
+                self.running = False
+
+                yield {
+                    "status":
+                        "cancelled",
+                    "task_id":
+                        task_id,
+                    "message": (
+                        "已停止当前任务。"
+                    ),
+                    "time": now_text(),
+                }
+
+                return
 
             if result is None:
 
@@ -1186,24 +1537,30 @@ class AgentService:
                 == "approval_required"
             ):
 
-                await self._disconnect_mcp_servers(
-                    keep_for_resume=True
-                )
+                # 进入 HITL：保持 MCP 连接不断，
+                # 否则用户点「批准」后还要再等一次冷启动。
 
                 yield terminal
 
                 return
 
-            # 正常结束：关闭 MCP 并清理整个 Task 状态。
-            await self._disconnect_mcp_servers(
-                keep_for_resume=False
-            )
+            # 正常结束：清 Task 状态，但保留 MCP 连接复用。
+
+            self._cancel_requested = False
 
             self._clear_pending()
 
             yield terminal
 
         except Exception as e:
+
+            # 出错时连接状态不可信，销毁连接池，
+            # 下次任务重新连接。
+            self._mcp_pool = []
+
+            self._mcp_pool_signature = (
+                None
+            )
 
             await self._disconnect_mcp_servers(
                 keep_for_resume=False
@@ -1213,9 +1570,61 @@ class AgentService:
                 e
             )
 
+        except BaseException:
+
+            # 客户端中途断开时会走到这里：
+            # 关闭标签页、网络掉线，或上层 generator
+            # 没有消费完就被回收，Python 会向本 generator
+            # 抛 GeneratorExit / CancelledError。
+            #
+            # 它们继承自 BaseException 而不是 Exception，
+            # 上面的分支接不住，_running 就会永久停在 True，
+            # 之后每一条新任务都会被
+            # "当前已有任务正在运行" 挡在门外，
+            # 除了重启服务没有任何自救办法。
+            #
+            # 此刻已经没办法再 yield 事件给任何人，
+            # 这里不吞异常，照原样往上抛。
+            raise
+
+        finally:
+
+            # 所有退出路径的统一兜底：
+            # 正常完成 / 进入审批 / 取消 / 失败 / 断开。
+            # 唯一职责是把运行位让出来，
+            # 不影响 pending_state 等其它 Task 状态。
+            self.running = False
+
     # ========================================================
     # 审批：流式恢复
     # ========================================================
+
+    def request_cancel(
+        self,
+    ) -> None:
+        """
+        请求停止当前正在运行的 Task。
+
+        只设置标志位；真正的退出发生在
+        stream_task 的事件循环中，
+        这样能保证 MCP 连接被正常 cleanup。
+        """
+
+        self._cancel_requested = True
+        from agent_tools.coding_tools import cancel_active_shells
+        cancel_active_shells()
+
+    def is_busy(
+        self,
+    ) -> bool:
+        """
+        当前是否正在执行任务或等待审批。
+        """
+
+        return bool(
+            self.running
+            or self.pending_interruptions
+        )
 
     async def stream_approval(
         self,
@@ -1348,6 +1757,10 @@ class AgentService:
 
             self.running = True
 
+            self._cancel_requested = (
+                False
+            )
+
             state = self.pending_state
 
         try:
@@ -1402,9 +1815,8 @@ class AgentService:
                 == "approval_required"
             ):
 
-                await self._disconnect_mcp_servers(
-                    keep_for_resume=True
-                )
+                # 进入 HITL：保持 MCP 连接不断，
+                # 否则用户点「批准」后还要再等一次冷启动。
 
                 yield terminal
 
@@ -1420,6 +1832,14 @@ class AgentService:
 
         except Exception as e:
 
+            # 出错时连接状态不可信，销毁连接池，
+            # 下次任务重新连接。
+            self._mcp_pool = []
+
+            self._mcp_pool_signature = (
+                None
+            )
+
             await self._disconnect_mcp_servers(
                 keep_for_resume=False
             )
@@ -1427,6 +1847,31 @@ class AgentService:
             yield self._handle_failure(
                 e
             )
+
+        except BaseException:
+
+            # 客户端中途断开时会走到这里：
+            # 关闭标签页、网络掉线，或上层 generator
+            # 没有消费完就被回收，Python 会向本 generator
+            # 抛 GeneratorExit / CancelledError。
+            #
+            # 它们继承自 BaseException 而不是 Exception，
+            # 上面的分支接不住，_running 就会永久停在 True，
+            # 之后每一条新任务都会被
+            # "当前已有任务正在运行" 挡在门外，
+            # 除了重启服务没有任何自救办法。
+            #
+            # 此刻已经没办法再 yield 事件给任何人，
+            # 这里不吞异常，照原样往上抛。
+            raise
+
+        finally:
+
+            # 所有退出路径的统一兜底：
+            # 正常完成 / 进入审批 / 取消 / 失败 / 断开。
+            # 唯一职责是把运行位让出来，
+            # 不影响 pending_state 等其它 Task 状态。
+            self.running = False
 
     # ========================================================
     # SDK Streaming

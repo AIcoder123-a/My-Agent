@@ -384,6 +384,235 @@ def _normalize_args(
     ]
 
 
+def _slugify_ascii(
+    value: str,
+) -> str:
+    """
+    把任意字符串压缩为
+    OpenAI function name 安全的 ASCII 片段。
+
+    OpenAI function name 只允许：
+        ^[a-zA-Z0-9_-]+$
+
+    中文名会被 SDK 整体丢弃，
+    导致所有 MCP 工具退化成
+        mcp_server__xxx_<hash>
+    因此这里必须先净化。
+    """
+
+    chars = []
+
+    for char in str(
+        value
+    ).strip():
+
+        if (
+            char.isascii()
+            and (
+                char.isalnum()
+                or char in {
+                    "_",
+                    "-",
+                }
+            )
+        ):
+
+            chars.append(
+                char
+            )
+
+        elif char.isascii():
+
+            chars.append(
+                "_"
+            )
+
+    result = (
+        "".join(
+            chars
+        )
+        .strip(
+            "_-"
+        )
+        .lower()
+    )
+
+    # 合并连续下划线，避免名字过长
+    while (
+        "__"
+        in result
+    ):
+
+        result = result.replace(
+            "__",
+            "_",
+        )
+
+    return result
+
+
+def _normalize_tool_prefix(
+    raw: object,
+    display_name: str,
+    server_id: str,
+) -> str:
+    """
+    生成 MCP Server 的英文工具前缀。
+
+    优先级：
+        用户显式填写的 tool_prefix
+        → 显示名本身已是 ASCII
+        → 由 server id 生成稳定前缀
+    """
+
+    candidate = (
+        _slugify_ascii(
+            str(
+                raw
+                or ""
+            )
+        )
+    )
+
+    if candidate:
+
+        return candidate[
+            :32
+        ]
+
+    candidate = (
+        _slugify_ascii(
+            display_name
+        )
+    )
+
+    if candidate:
+
+        return candidate[
+            :32
+        ]
+
+    return (
+        "mcp_"
+        + str(
+            server_id
+        ).replace(
+            "-",
+            "",
+        )[
+            :8
+        ].lower()
+    )
+
+
+# 只读类 MCP 工具：自动放行
+MCP_READ_HINTS = (
+    "read",
+    "list",
+    "get",
+    "search",
+    "show",
+    "find",
+    "query",
+    "fetch",
+    "tree",
+    "info",
+    "stat",
+    "describe",
+    "allowed",
+)
+
+# 写入 / 破坏类 MCP 工具：必须人工批准
+MCP_WRITE_HINTS = (
+    "write",
+    "edit",
+    "create",
+    "delete",
+    "remove",
+    "move",
+    "rename",
+    "update",
+    "append",
+    "mkdir",
+    "exec",
+    "run",
+    "kill",
+    "send",
+    "post",
+    "put",
+    "patch",
+    "commit",
+    "push",
+)
+
+
+def mcp_tool_needs_approval(
+    *args,
+    **kwargs,
+) -> bool:
+    """
+    MCP 单工具审批策略（smart 模式）。
+
+    OpenAI Agents SDK 支持把
+        require_approval
+    传为一个回调：
+
+        (run_context, agent, tool) -> bool
+
+    这里用工具名做启发式判断：
+
+        只读类  → 自动放行
+        写入类  → 每次询问
+        无法判断 → 保守询问
+
+    返回 True 表示需要人工批准。
+    """
+
+    tool = (
+        kwargs.get(
+            "tool"
+        )
+        or (
+            args[2]
+            if len(
+                args
+            )
+            >= 3
+            else None
+        )
+    )
+
+    tool_name = str(
+        getattr(
+            tool,
+            "name",
+            "",
+        )
+        or ""
+    ).lower()
+
+    if not tool_name:
+
+        return True
+
+    if any(
+        hint in tool_name
+        for hint in MCP_WRITE_HINTS
+    ):
+
+        return True
+
+    if any(
+        hint in tool_name
+        for hint in MCP_READ_HINTS
+    ):
+
+        return False
+
+    # 无法判断时保守处理
+    return True
+
+
 def _clean_server(
     server: dict,
 ) -> dict:
@@ -404,22 +633,23 @@ def _clean_server(
     approval = str(
         server.get(
             "require_approval",
-            "always",
+            "smart",
         )
     ).strip()
 
     if approval not in {
         "always",
         "never",
+        "smart",
     }:
-        approval = "always"
+        approval = "smart"
 
     timeout = int(
         server.get(
             "timeout_seconds",
-            10,
+            30,
         )
-        or 10
+        or 30
     )
 
     timeout = max(
@@ -430,21 +660,38 @@ def _clean_server(
         ),
     )
 
-    return {
-        "id": str(
-            server.get(
-                "id",
-                "",
-            )
-            or uuid.uuid4()
-        ),
-        "name": str(
+    server_id = str(
+        server.get(
+            "id",
+            "",
+        )
+        or uuid.uuid4()
+    )
+
+    display_name = (
+        str(
             server.get(
                 "name",
                 "",
             )
         ).strip()
-        or "未命名 MCP",
+        or "未命名 MCP"
+    )
+
+    return {
+        "id":
+            server_id,
+        "name":
+            display_name,
+        "tool_prefix":
+            _normalize_tool_prefix(
+                server.get(
+                    "tool_prefix",
+                    "",
+                ),
+                display_name,
+                server_id,
+            ),
         "transport":
             transport,
         "enabled": bool(
@@ -1082,18 +1329,49 @@ def build_mcp_server(
         server_config
     )
 
-    approval = (
-        "always"
-        if server.get(
-            "require_approval"
+    approval_mode = str(
+        server.get(
+            "require_approval",
+            "smart",
         )
-        == "always"
-        else "never"
-    )
+    ).strip()
+
+    if approval_mode == (
+        "always"
+    ):
+
+        approval_policy = (
+            True
+        )
+
+    elif approval_mode == (
+        "never"
+    ):
+
+        approval_policy = (
+            False
+        )
+
+    else:
+
+        # smart：只读自动放行，
+        # 写入类必须人工批准。
+        approval_policy = (
+            mcp_tool_needs_approval
+        )
 
     common = {
+        # SDK 会把 server name 编进
+        # function tool name。
+        # 中文名会被整体丢弃，
+        # 因此这里使用 ASCII 前缀。
         "name":
-            server["name"],
+            server.get(
+                "tool_prefix"
+            )
+            or server[
+                "name"
+            ],
         "cache_tools_list":
             bool(
                 server.get(
@@ -1101,15 +1379,17 @@ def build_mcp_server(
                     True,
                 )
             ),
+        # stdio Server（npx / uvx）冷启动会明显更慢，
+        # 默认给 30 秒，避免首次连接被误判为失败。
         "client_session_timeout_seconds":
             float(
                 server.get(
                     "timeout_seconds",
-                    10,
+                    30,
                 )
             ),
         "require_approval":
-            approval,
+            approval_policy,
     }
 
     if (
@@ -1167,9 +1447,12 @@ def build_mcp_server(
 
             params["cwd"] = cwd
 
-        return MCPServerStdio(
-            params=params,
-            **common,
+        return _attach_mcp_meta(
+            MCPServerStdio(
+                params=params,
+                **common,
+            ),
+            server,
         )
 
     http = (
@@ -1216,10 +1499,68 @@ def build_mcp_server(
             ),
     }
 
-    return MCPServerStreamableHttp(
-        params=params,
-        **common,
+    return _attach_mcp_meta(
+        MCPServerStreamableHttp(
+            params=params,
+            **common,
+        ),
+        server,
     )
+
+
+def _attach_mcp_meta(
+    mcp_server: Any,
+    server: dict,
+) -> Any:
+    """
+    保留中文显示名。
+
+    SDK 内部只使用 ASCII name，
+    但界面 / 审计日志应该显示
+    用户能读懂的中文名。
+    """
+
+    try:
+
+        setattr(
+            mcp_server,
+            "display_name",
+            str(
+                server.get(
+                    "name",
+                    "",
+                )
+            )
+            or "未命名 MCP",
+        )
+
+        setattr(
+            mcp_server,
+            "server_id",
+            str(
+                server.get(
+                    "id",
+                    "",
+                )
+            ),
+        )
+
+        setattr(
+            mcp_server,
+            "approval_mode",
+            str(
+                server.get(
+                    "require_approval",
+                    "smart",
+                )
+            ),
+        )
+
+    except Exception:
+
+        pass
+
+    return mcp_server
 
 
 def _tool_description(

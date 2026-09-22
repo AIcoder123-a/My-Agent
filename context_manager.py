@@ -595,10 +595,88 @@ def _remove_orphan_tool_outputs(
                 # 不发送给模型，避免协议级 400。
                 continue
 
-            result.append(
-                item
+        result.append(
+            item
+        )
+        continue
+
+        result.append(
+            item
+        )
+
+    return result
+
+
+def _remove_unanswered_tool_calls(
+    items: list[dict],
+) -> list[dict]:
+    """
+    删除“没有结果”的 Tool Call。
+
+    场景：
+    HITL 审批被用户放弃（关闭窗口 / 从不点击），
+    或进程在 Tool 执行前中断。
+
+    此时 SQLite 里会留下：
+
+        assistant: function_call(call_123)
+        （没有对应的 function_call_output）
+
+    OpenAI-compatible API 会直接 400：
+
+        An assistant message with 'tool_calls'
+        must be followed by tool messages
+        responding to each tool_call_id
+
+    因此这类悬空 Tool Call 必须从
+    发给模型的历史中剔除。
+
+    注意：
+    只删除悬空 Tool Call 本身；
+    完整原始历史仍然保留在 SQLite 中。
+    """
+
+    answered = set()
+
+    for item in items:
+
+        if _is_tool_output(
+            item
+        ):
+
+            call_id = (
+                _item_call_id(
+                    item
+                )
             )
-            continue
+
+            if call_id:
+
+                answered.add(
+                    call_id
+                )
+
+    result = []
+
+    for item in items:
+
+        if _is_tool_call(
+            item
+        ):
+
+            call_id = (
+                _item_call_id(
+                    item
+                )
+            )
+
+            if (
+                call_id
+                and call_id
+                not in answered
+            ):
+
+                continue
 
         result.append(
             item
@@ -1171,6 +1249,14 @@ def build_session_input_callback(
         # 防御旧数据或异常中断导致的真正孤立 Tool Output。
         raw_history = (
             _remove_orphan_tool_outputs(
+                raw_history
+            )
+        )
+
+        # 防御被放弃的 HITL 审批：
+        # 悬空 Tool Call 会让 API 直接 400。
+        raw_history = (
+            _remove_unanswered_tool_calls(
                 raw_history
             )
         )

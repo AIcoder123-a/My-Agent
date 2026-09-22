@@ -18,3 +18,11 @@ data/notes.txt
 *.log
 workspace/*
 !workspace/.gitkeep
+# Local runtime state and SQLite sidecars
+*.db-shm
+*.db-wal
+data/settings.json
+data/mcp_servers.json
+data/plugins.json
+data/plans/
+data/exports/
