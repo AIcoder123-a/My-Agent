@@ -33,8 +33,10 @@ function harness(saved = null, storedBlob = null) {
   const preview = new Element(), current = new Element();
   const status = new Element('p'), file = new Element('input'), reset = new Element('button');
   const element = new Element();
+  const extras = Object.fromEntries(['[data-clear-media]', '[data-motion-state]', '[data-picked]', '[data-picked-kind]', '[data-picked-name]', '[data-picked-size]'].map(key => [key, new Element()]));
+  extras['[data-picked]'].querySelector = key => extras[key];
   element.querySelectorAll = s => s === '[data-setting]' ? controls : presets;
-  element.querySelector = s => s === '[data-preview]' ? preview : s === '[data-current]' ? current : s === '[data-status]' ? status : s === 'input[type=file]' ? file : s === '[data-reset]' ? reset : outputs[s.match(/"(.*?)"/)[1]];
+  element.querySelector = s => s === '[data-preview]' ? preview : s === '[data-current]' ? current : s === '[data-status]' ? status : s === 'input[type=file]' ? file : s === '[data-reset]' ? reset : extras[s] || outputs[s.match(/"(.*?)"/)?.[1]] || null;
   const document = new Element(); document.body = new Element(); document.head = new Element(); document.documentElement = new Element(); document.hidden = false;
   document.createElement = tag => new Element(tag);
   document.getElementById = id => document.body.children.find(e => e.id === id);
@@ -79,7 +81,7 @@ test('oversized and unsupported uploads do not replace the background', async ()
   const h = harness();
   for (const file of [{type:'video/mp4',size:101*1024*1024},{type:'text/html',size:100}]) {
     h.file.files = [file]; await h.file.dispatch('change');
-    assert.equal(h.blob(), null); assert.match(h.status.textContent, /超限/);
+    assert.equal(h.blob(), null); assert.match(h.status.textContent, /\u8d85\u9650/);
   }
 });
 

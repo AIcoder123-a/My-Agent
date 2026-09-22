@@ -2480,6 +2480,36 @@ async def send_task(
     ).strip()
 
     # --------------------------------------------------------
+    # 空输入
+    # --------------------------------------------------------
+
+    if not message:
+        gr.Warning("请输入任务内容，或选择一个快捷任务。")
+
+        yield (
+            clone_history(
+                history
+            ),
+            "请输入任务内容。",
+            service.get_session_id(),
+            current_task_text(),
+            (
+                approval_view()
+            ),
+            approval_button_state(False),
+            approval_button_state(False),
+            button_state(True),
+            button_state(True),
+            trace_state or [],
+            trace_state or [],
+            empty_sources_text(),
+            button_state(False),
+            "",
+        )
+
+        return
+
+    # --------------------------------------------------------
     # 未配置模型：必须 yield 一次，
     # 否则界面完全不更新，看起来就是「点了发送没反应」。
     # --------------------------------------------------------
@@ -2536,37 +2566,7 @@ async def send_task(
             trace_state or [],
             empty_sources_text(),
             button_state(False),
-            "",
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # 空输入
-    # --------------------------------------------------------
-
-    if not message:
-        gr.Warning("请输入任务内容，或选择一个快捷任务。")
-
-        yield (
-            clone_history(
-                history
-            ),
-            "请输入任务内容。",
-            service.get_session_id(),
-            current_task_text(),
-            (
-                approval_view()
-            ),
-            approval_button_state(False),
-            approval_button_state(False),
-            button_state(True),
-            button_state(True),
-            trace_state or [],
-            trace_state or [],
-            empty_sources_text(),
-            button_state(False),
-            "",
+            message,
         )
 
         return
@@ -4698,7 +4698,7 @@ def runtime_status_markdown() -> str:
         f'<span class="chip {state_cls}">'
         f'<span class="dot {dot_cls}"></span>'
         f"{state}</span>"
-        f'<span class="chip">{model}</span>'
+        f'<span class="chip">{html.escape(model)}</span>'
         f'<span class="chip mcp">'
         f"MCP {mcp_text}</span>"
     )
@@ -7386,6 +7386,8 @@ with gr.Blocks(
             # 清空显示降为次级，避免两个按钮抢注意力。
             # ------------------------------------------------
 
+            gr.HTML('<div class="shell-sidebar-heading"><span>会话与工具</span><button type="button" class="shell-icon" data-shell="close" aria-label="关闭会话侧栏">×</button></div>')
+
             new_session_button = (
                 gr.Button(
                     "+ 新任务",
@@ -7393,6 +7395,13 @@ with gr.Blocks(
                     elem_id="new-task-button",
                 )
             )
+
+            gr.HTML('''<nav class="workbench-nav" aria-label="工作台导航">
+                <button type="button" data-workbench-tab="进度"><span aria-hidden="true">◷</span>任务进度</button>
+                <button type="button" data-workbench-tab="文件"><span aria-hidden="true">▤</span>工作区文件</button>
+                <button type="button" data-workbench-tab="插件"><span aria-hidden="true">◇</span>插件与扩展</button>
+                <button type="button" data-workbench-tab="设置"><span aria-hidden="true">⚙</span>设置与外观</button>
+            </nav>''')
 
             gr.HTML(
                 '<div class="section-label rule">'
@@ -7467,116 +7476,117 @@ with gr.Blocks(
                     )
                 )
 
-            gr.HTML(
-                '<div class="section-label rule">'
-                "快捷任务"
-                "</div>"
-            )
+            with gr.Accordion("工具与运行配置", open=False):
+                gr.HTML(
+                    '<div class="section-label rule">'
+                    "快捷任务"
+                    "</div>"
+                )
 
-            quick_buttons = []
+                quick_buttons = []
 
-            for _title, _prompt in (
-                QUICK_PROMPTS[:4]
-            ):
+                for _title, _prompt in (
+                    QUICK_PROMPTS[:4]
+                ):
 
-                quick_buttons.append(
+                    quick_buttons.append(
+                        gr.Button(
+                            _title,
+                            elem_classes=[
+                                "quick-btn"
+                            ],
+                        )
+                    )
+
+                gr.HTML(
+                    '<div class="section-label rule">'
+                    "模型与接口"
+                    "</div>"
+                )
+
+                model_status_left = (
+                    gr.HTML(
+                        model_status_markdown(),
+                        elem_id="model-status",
+                    )
+                )
+
+                open_model_settings_button = (
                     gr.Button(
-                        _title,
+                        "配置接口 / API Key",
+                        elem_id="open-model-settings-button",
+                    )
+                )
+
+                gr.HTML(
+                    '<div class="section-label rule">'
+                    "工作区"
+                    "</div>"
+                )
+
+                workspace_path = (
+                    gr.HTML(
+                        workspace_summary_markdown(),
+                        elem_id="workspace-path",
+                    )
+                )
+
+                with gr.Row(
+                    elem_classes=[
+                        "side-row"
+                    ],
+                ):
+
+                    export_button = (
+                        gr.Button(
+                            "导出对话",
+                            elem_id="export-button",
+                        )
+                    )
+
+                    open_workspace_button = (
+                        gr.Button(
+                            "打开目录",
+                            elem_id="open-workspace-button",
+                        )
+                    )
+
+                export_file = (
+                    gr.File(
+                        label="导出文件",
+                        visible=False,
+                        elem_id="export-file",
+                    )
+                )
+
+                export_status = (
+                    gr.Markdown(
+                        value="",
+                        elem_id="export-status",
+                    )
+                )
+
+                gr.HTML(
+                    '<div class="section-label rule">'
+                    "插件"
+                    "</div>"
+                )
+
+                plugin_summary_left = (
+                    gr.HTML(
+                        plugin_summary_markdown(),
                         elem_classes=[
-                            "quick-btn"
+                            "side-stat"
                         ],
                     )
                 )
 
-            gr.HTML(
-                '<div class="section-label rule">'
-                "模型与接口"
-                "</div>"
-            )
-
-            model_status_left = (
-                gr.HTML(
-                    model_status_markdown(),
-                    elem_id="model-status",
-                )
-            )
-
-            open_model_settings_button = (
-                gr.Button(
-                    "配置接口 / API Key",
-                    elem_id="open-model-settings-button",
-                )
-            )
-
-            gr.HTML(
-                '<div class="section-label rule">'
-                "工作区"
-                "</div>"
-            )
-
-            workspace_path = (
-                gr.HTML(
-                    workspace_summary_markdown(),
-                    elem_id="workspace-path",
-                )
-            )
-
-            with gr.Row(
-                elem_classes=[
-                    "side-row"
-                ],
-            ):
-
-                export_button = (
+                manage_plugin_button = (
                     gr.Button(
-                        "导出对话",
-                        elem_id="export-button",
+                        "管理插件",
+                        elem_id="manage-plugin-button",
                     )
                 )
-
-                open_workspace_button = (
-                    gr.Button(
-                        "打开目录",
-                        elem_id="open-workspace-button",
-                    )
-                )
-
-            export_file = (
-                gr.File(
-                    label="导出文件",
-                    visible=False,
-                    elem_id="export-file",
-                )
-            )
-
-            export_status = (
-                gr.Markdown(
-                    value="",
-                    elem_id="export-status",
-                )
-            )
-
-            gr.HTML(
-                '<div class="section-label rule">'
-                "插件"
-                "</div>"
-            )
-
-            plugin_summary_left = (
-                gr.HTML(
-                    plugin_summary_markdown(),
-                    elem_classes=[
-                        "side-stat"
-                    ],
-                )
-            )
-
-            manage_plugin_button = (
-                gr.Button(
-                    "管理插件",
-                    elem_id="manage-plugin-button",
-                )
-            )
 
         # ====================================================
         # Center Chat
@@ -7595,7 +7605,10 @@ with gr.Blocks(
             # 永远不会盖住下面的审批栏和输入框。
             # --------------------------------------------
 
-            gr.HTML('<div class="conversation-heading"><span>工作对话</span><small>想法在这里成为结果</small></div>')
+            gr.HTML('''<div class="conversation-heading">
+                <div class="shell-title"><button type="button" class="shell-icon mobile-sidebar" data-shell="sidebar" aria-label="展开会话侧栏" aria-controls="left-panel" aria-expanded="false">☰</button><span>工作对话</span></div>
+                <div class="shell-actions"><button type="button" data-workbench-tab="文件">文件</button><button type="button" data-workbench-tab="设置">设置与外观</button><button type="button" data-shell="inspector" aria-controls="right-panel" aria-expanded="false">工作台</button></div>
+            </div>''')
 
             with gr.Column(
                 elem_id="chat-stage",
@@ -7786,7 +7799,7 @@ with gr.Blocks(
             elem_id="right-panel",
         ):
 
-            gr.HTML('<div class="inspector-heading"><span>工作台</span><small>任务 · 资料 · 偏好</small></div>')
+            gr.HTML('<div class="inspector-heading"><span>工作台</span><button type="button" class="shell-icon" data-shell="close" aria-label="关闭工作台">×</button></div>')
 
             with gr.Tabs(elem_id="inspector-tabs"):
 
@@ -9782,16 +9795,23 @@ COMPOSER_MENU_JS = """
 
     // 供按钮/菜单直接调用：按名字切到右栏某个 Tab
     window.xiaozhiOpenTab = function (name) {
+        window.xiaozhiShell?.open();
         var host = document.querySelector('#right-panel');
         if (!host) { return false; }
-        var buttons = host.querySelectorAll('.tab-container:not(.visually-hidden) button');
-        for (var i = 0; i < buttons.length; i++) {
-            if ((buttons[i].textContent || '').trim() === name) {
-                buttons[i].click();
-                return true;
+        var tries = 0;
+        function selectTab() {
+            var buttons = host.querySelectorAll('button[role="tab"]');
+            for (var i = 0; i < buttons.length; i++) {
+                if ((buttons[i].textContent || '').trim() === name) {
+                    buttons[i].click();
+                    return;
+                }
             }
+            if (++tries < 12) { setTimeout(selectTab, 80); }
+            else { notify('面板未能打开，请重新点击工作台。'); }
         }
-        return false;
+        requestAnimationFrame(selectTab);
+        return true;
     };
 
     // 直达「设置 → 模型」：先切右栏顶层 Tab，
@@ -10000,7 +10020,10 @@ COMPOSER_MENU_JS = """
 })();
 """
 
-KEYBOARD_JS = KEYBOARD_JS.replace("() => {", "() => {\n" + APPEARANCE_JS + "\n", 1)
+WORKBENCH_JS = (Path(__file__).parent / "assets" / "workbench.js").read_text(encoding="utf-8")
+WORKBENCH_CSS = (Path(__file__).parent / "assets" / "workbench.css").read_text(encoding="utf-8")
+WORKBENCH_JS = "{const style=document.createElement('style');style.textContent=" + json.dumps(WORKBENCH_CSS) + ";document.head.append(style);}" + WORKBENCH_JS
+KEYBOARD_JS = KEYBOARD_JS.replace("() => {", "() => {\n" + APPEARANCE_JS + "\n" + WORKBENCH_JS + "\n", 1)
 KEYBOARD_JS = KEYBOARD_JS.replace("() => {", "() => {\n" + TAB_SCROLL_JS + "\n", 1)
 KEYBOARD_JS = KEYBOARD_JS.replace("() => {", "() => {\n" + COMPOSER_MENU_JS + "\n", 1)
 
