@@ -55,6 +55,8 @@ from mcp_manager import (
     test_mcp_server,
 )
 
+import usage_stats
+
 # ============================================================
 # 基础路径
 # ============================================================
@@ -3036,6 +3038,47 @@ def context_markdown() -> str:
             ),
         ]
     )
+
+    # --------------------------------------------------
+    # 用量
+    #
+    # 原先 set_tracing_disabled(True) 之后 Usage 直接丢弃，
+    # 跑一次任务花了多少 token 完全靠猜。
+    # --------------------------------------------------
+
+    try:
+
+        session_usage = (
+            usage_stats.get_session_usage(
+                service.get_session_id()
+            )
+        )
+
+        total_usage = (
+            usage_stats.get_total_usage()
+        )
+
+        lines.extend(
+            [
+                "",
+                "### 用量（本会话）",
+                "",
+                usage_stats.format_usage(
+                    session_usage
+                ),
+                "",
+                "### 用量（全部会话累计）",
+                "",
+                usage_stats.format_usage(
+                    total_usage
+                ),
+            ]
+        )
+
+    except Exception:
+
+        # 用量展示失败不应该影响上下文面板
+        pass
 
     return "\n".join(
         lines

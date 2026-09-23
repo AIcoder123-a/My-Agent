@@ -54,6 +54,8 @@ from mcp_manager import (
     list_mcp_servers,
 )
 
+import usage_stats
+
 
 # ============================================================
 # Runner 配置
@@ -390,6 +392,13 @@ class AgentService:
 
         self._mcp_failed_signature = (
             None
+        )
+
+        # 本次任务已上报的用量累计值。
+        # 用于把 Runner 的「任务内累计」换算成增量，
+        # 避免 _finalize_result 多次调用导致重复计数。
+        self._task_usage_baseline = (
+            {}
         )
 
     # ========================================================
@@ -1448,6 +1457,12 @@ class AgentService:
             )
             task_id = self.task_id
 
+            # 新任务：用量基线归零，
+            # 否则会把上一个任务的累计值算成这一轮的增量。
+            self._task_usage_baseline = (
+                {}
+            )
+
             touch_session(
                 self.session_id
             )
@@ -1732,7 +1747,11 @@ class AgentService:
 
             # 正常结束：清 Task 状态，但保留 MCP 连接复用。
 
-            self._cancel_requested = False
+            self._cancel_requested = (
+                False
+            )
+
+            self._finish_task_accounting()
 
             self._clear_pending()
 
@@ -2121,6 +2140,8 @@ class AgentService:
                             False
                         )
                     )
+
+                    self._finish_task_accounting()
 
                     self._clear_pending()
 
@@ -2712,10 +2733,115 @@ class AgentService:
     # Run 完成处理
     # ========================================================
 
+    def _finish_task_accounting(
+        self,
+    ) -> None:
+        """
+        任务真正完成时记一次任务数。
+
+        只有走到终态（不是审批暂停、不是取消）才计数，
+        这样「均摊 token / 任务」才有意义。
+        """
+
+        try:
+
+            usage_stats.count_task(
+                self.session_id
+            )
+
+        except Exception:
+            pass
+
+    def _record_usage(
+        self,
+        result,
+    ) -> dict:
+        """
+        记录一次 Runner 的用量增量。
+
+        context_wrapper.usage 是「任务内累计值」，
+        而 _finalize_result 每轮都会被调用
+        （进入审批时一次，恢复后又一次），
+        直接累加会重复计数，所以这里只上报增量。
+        """
+
+        try:
+
+            context = getattr(
+                result,
+                "context_wrapper",
+                None,
+            )
+
+            usage = getattr(
+                context,
+                "usage",
+                None,
+            )
+
+            if usage is None:
+                return {}
+
+            snapshot = (
+                usage_stats.extract_usage(
+                    usage
+                )
+            )
+
+        except Exception:
+            return {}
+
+        baseline = (
+            self._task_usage_baseline
+            or {}
+        )
+
+        delta = {}
+
+        for key, value in (
+            snapshot.items()
+        ):
+
+            delta[key] = max(
+                0,
+                value
+                - baseline.get(
+                    key,
+                    0
+                ),
+            )
+
+        if not any(
+            delta.values()
+        ):
+            return {}
+
+        self._task_usage_baseline = (
+            snapshot
+        )
+
+        try:
+
+            usage_stats.record_usage(
+                self.session_id,
+                delta,
+            )
+
+        except Exception:
+            pass
+
+        return delta
+
     def _finalize_result(
         self,
         result,
     ) -> dict:
+
+        # 记账放在最前面：
+        # 之后无论走审批 / 完成 / 失败哪条分支都已经被记录。
+        self._record_usage(
+            result
+        )
 
         # ====================================================
         # 等待审批

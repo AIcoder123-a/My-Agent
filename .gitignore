@@ -26,6 +26,8 @@ data/mcp_servers.json
 data/plugins.json
 data/plans/
 data/exports/
+data/usage.json
+data/tool_audit.*.jsonl
 
 # WorkBuddy 工作区状态：会话记忆、日志、临时产物
 .workbuddy/

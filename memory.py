@@ -37,14 +37,11 @@ CURRENT_SESSION_FILE = (
 # 上下文策略
 # ============================================================
 
-# 注意：
-# 这是 Session Item 数量，不等于聊天轮数。
-#
-# Tool Call / Tool Output 也属于 Item。
-#
-# 数据库仍然保存全部历史；
-# 这里只限制每次给模型读取的最近历史数量。
-CONTEXT_ITEM_LIMIT = 80
+# 条目与体积阈值的唯一来源是 token_budget，
+# 这里不再自己定义一份，避免两处漂移。
+from token_budget import (
+    CONTEXT_ITEM_LIMIT,
+)
 
 
 # ============================================================
@@ -178,6 +175,21 @@ def _make_session(
 
     CONTEXT_ITEM_LIMIT 只影响读取给模型的历史数量，
     不影响数据库保存完整历史。
+
+    分层关系（不是重复，也不是笔误）：
+
+        SQLiteSession.limit = CONTEXT_ITEM_LIMIT (80)
+            └─ 从数据库读多少条给 Agent
+
+        context_manager 的切分
+            ├─ RECENT_CONTEXT_ITEMS (48)
+            └─ RECENT_CONTEXT_TOKENS (30000)
+                └─ 读进来之后再切一次，
+                   只把这部分留在原始上下文里，
+                   其余进入长期摘要
+
+    SDK 的 limit 只支持条目数，不支持体积，
+    所以体积那一道闸必须在 context_manager 里补。
     """
 
     session = SQLiteSession(

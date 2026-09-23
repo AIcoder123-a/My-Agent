@@ -28,28 +28,24 @@ DB_PATH = (
 # Context 策略
 # ============================================================
 
-# 希望主 Agent 至少保留的最近原始历史 Item 数。
+# 阈值与体积估算统一收敛到 token_budget，
+# 不再分散在 context_manager / memory 两处。
 #
-# 注意：
-# 这不是绝对硬切点。
-# 如果切点落在 Tool Call / Tool Output 中间，
-# 会自动向前移动，以保留完整工具调用配对。
-RECENT_CONTEXT_ITEMS = 48
-
-# 总历史超过这个数量后开始考虑压缩。
-SUMMARY_TRIGGER_ITEMS = 80
-
-# 已经存在摘要后，至少再累积这么多可压缩 Item
-# 才重新生成一次增量摘要。
-#
-# 避免每聊一句就额外调用一次摘要模型。
-MIN_NEW_SUMMARY_ITEMS = 16
-
-# 防止一次摘要 Prompt 过大。
-MAX_SOURCE_CHARS = 32000
-
-# 最多保留的摘要字符。
-MAX_SUMMARY_CHARS = 6000
+# 关键变化：除了条目数，现在还有一道 token 体积闸。
+# 一条 Tool Output 实测可达 3.2 万字符（约 1 万 token），
+# 只数条目完全挡不住撑爆窗口。
+from token_budget import (
+    CONTEXT_ITEM_LIMIT,
+    MAX_SOURCE_CHARS,
+    MAX_SUMMARY_CHARS,
+    MIN_NEW_SUMMARY_ITEMS,
+    RECENT_CONTEXT_ITEMS,
+    RECENT_CONTEXT_TOKENS,
+    SUMMARY_TRIGGER_ITEMS,
+    SUMMARY_TRIGGER_TOKENS,
+    estimate_items_tokens,
+    token_cutoff,
+)
 
 
 # ============================================================
@@ -925,6 +921,25 @@ def get_compaction_plan(
         - RECENT_CONTEXT_ITEMS,
     )
 
+    # 第二道闸：体积。
+    #
+    # 48 条小消息很安全，
+    # 但 48 条 3 万字符的 Tool Output 就是几十万 token。
+    # 这里从末尾按 token 预算再切一次，
+    # 两个切点取更靠后的那个（保留更少 = 更保守）。
+
+    cutoff_by_tokens = (
+        token_cutoff(
+            items,
+            RECENT_CONTEXT_TOKENS,
+        )
+    )
+
+    desired_cutoff = max(
+        desired_cutoff,
+        cutoff_by_tokens,
+    )
+
     # 如果 desired_cutoff 落在
     # Tool Call / Tool Output 中间，
     # 自动向前移动到安全位置。
@@ -951,16 +966,30 @@ def get_compaction_plan(
         - summarized_items,
     )
 
-    needed = False
+    estimated_tokens = (
+        estimate_items_tokens(
+            items
+        )
+    )
 
-    if (
+    trigger_by_items = (
         total_items
         > SUMMARY_TRIGGER_ITEMS
         and new_summary_items
         >= MIN_NEW_SUMMARY_ITEMS
-    ):
+    )
 
-        needed = True
+    # 体积越线时不再等「新条目攒够」：
+    # 撑爆窗口的代价远大于多调一次摘要模型。
+    trigger_by_tokens = (
+        estimated_tokens
+        > SUMMARY_TRIGGER_TOKENS
+    )
+
+    needed = bool(
+        trigger_by_items
+        or trigger_by_tokens
+    )
 
     return {
         "needed":
