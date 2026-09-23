@@ -21,6 +21,10 @@ from agent_tools.file_tools import (
     read_file,
     write_file,
 )
+from agent_tools.snapshot_tools import (
+    list_recent_changes,
+    undo_last_change,
+)
 
 from agent_tools.finish_tools import (
     finish_task,
@@ -252,6 +256,8 @@ github_trending 返回 GitHub 官方 Trending 数据。
         web_search,
         web_fetch,
         github_trending,
+        list_recent_changes,
+        undo_last_change,
     ],
 
     tool_use_behavior=StopAtTools(

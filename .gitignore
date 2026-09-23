@@ -28,6 +28,7 @@ data/plans/
 data/exports/
 data/usage.json
 data/tool_audit.*.jsonl
+data/snapshots/
 
 # WorkBuddy 工作区状态：会话记忆、日志、临时产物
 .workbuddy/

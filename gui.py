@@ -633,6 +633,12 @@ with gr.Blocks(
                             )
                         )
 
+                        undo_change_button = (
+                            gr.Button(
+                                "撤销上次改动"
+                            )
+                        )
+
                         file_selector = (
                             gr.Dropdown(
                                 choices=(
@@ -1982,6 +1988,14 @@ with demo:
 
     refresh_files_button.click(
         fn=action_feedback(refresh_workspace, '工作区文件列表已刷新。'),
+        inputs=[],
+        outputs=[
+            file_selector,
+        ],
+    )
+
+    undo_change_button.click(
+        fn=undo_last_change_ui,
         inputs=[],
         outputs=[
             file_selector,

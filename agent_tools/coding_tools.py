@@ -13,6 +13,8 @@ from agents.decorators import tool
 from agent_tools.file_tools import safe_workspace_path
 from tool_errors import tool_error_to_model
 
+import workspace_snapshots
+
 _active: dict[int, Event] = {}
 _active_lock = Lock()
 SKIP_DIRS = {'.git', 'node_modules', '__pycache__', '.venv', 'venv'}
@@ -98,6 +100,8 @@ def edit_file_impl(path: str, old_text: str, new_text: str) -> str:
     if original.count(old_text) != 1:
         raise ValueError('待替换内容必须恰好匹配一次，请重新读取并提供唯一上下文。')
     updated = original.replace(old_text, new_text, 1)
+    # 替换前留一份旧内容，用户改坏了可以撤销。
+    workspace_snapshots.capture(path, action='edit_file')
     handle, temp = tempfile.mkstemp(dir=target.parent, suffix='.tmp')
     try:
         with os.fdopen(handle, 'wb') as stream:

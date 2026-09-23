@@ -70,6 +70,8 @@ import usage_stats
 from app_runtime import *  # noqa: F401,F403  service / 路径常量 / 名称映射
 from app_runtime import service  # noqa: F401  显式声明，便于静态检查
 
+import workspace_snapshots
+
 # ============================================================
 # 通用辅助
 # ============================================================
@@ -4763,3 +4765,20 @@ def export_conversation_markdown() -> tuple:
         ),
         f"已导出：{file_path.name}",
     )
+
+
+def undo_last_change_ui():
+    """撤销 Agent 最近一次对 workspace 文件的改动。
+
+    只覆盖 write_file / edit_file；
+    终端造成的变化不在快照里，这里撤不掉。
+    """
+
+    message = workspace_snapshots.undo_last()
+
+    if "没有可撤销" in message:
+        gr.Warning(message)
+    else:
+        gr.Info(message)
+
+    return workspace_files()

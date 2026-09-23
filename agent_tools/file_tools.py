@@ -12,6 +12,8 @@ from agents.decorators import tool
 
 from paths import WORKSPACE_DIR
 
+import workspace_snapshots
+
 
 def safe_workspace_path(relative_path: str) -> Path:
     """
@@ -214,6 +216,13 @@ def write_file(
         target.parent.mkdir(
             parents=True,
             exist_ok=True,
+        )
+
+        # 覆盖前留一份旧内容。
+        # 存快照失败不阻断写入，所以异常在 capture 内部消化。
+        workspace_snapshots.capture(
+            path,
+            action="write_file",
         )
 
         target.write_text(
