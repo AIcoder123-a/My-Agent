@@ -59,6 +59,11 @@ from mcp_manager import (
 # Runner 配置
 # ============================================================
 
+# 一个 MCP Server 连续连接失败达到这个次数后，
+# 才在下一次 Task 重新尝试（失败期间冷处理，避免每轮都白等冷启动）。
+MCP_RETRY_AFTER_FAILURES = 3
+
+
 def build_run_config(
     session_id: str,
 ) -> RunConfig:
@@ -190,14 +195,34 @@ def classify_tool_output(
         return True, output_text
 
     if tool_name == "run_shell":
+
         try:
-            payload = json.loads(stripped)
-            return (
-                payload.get("status") != "completed" or payload.get("exit_code") != 0,
-                output_text,
+            payload = json.loads(
+                stripped
             )
-        except (ValueError, AttributeError):
+        except (
+            ValueError,
+            TypeError,
+            AttributeError,
+        ):
             return True, output_text
+
+        # 只有「命令没能正常跑完」才算工具失败：
+        #   cancelled / timeout / output_limit
+        #
+        # exit_code != 0 是命令的合法业务结果，不是工具故障：
+        #   git diff 无变更 → 1
+        #   grep 无匹配     → 1
+        #   pytest 失败     → 1
+        # 把这类结果一律打成 tool_failed，会让模型误以为
+        # 「工具坏了、换个参数重试」，也会让用户在 UI 上看到假报错。
+        # 退出码原样留在输出里，模型自己能读到。
+
+        return (
+            payload.get("status")
+            != "completed",
+            output_text,
+        )
 
     # --------------------------------------------------------
     # Web Search 结构化业务结果
@@ -344,6 +369,29 @@ class AgentService:
             None
         )
 
+        # ------------------------------------------------
+        # 失败 Server 的“康复”记录
+        #
+        # 原先的实现有个静默故障：
+        # 初次连接失败的 Server 被直接踢出连接池，
+        # 但配置指纹（signature）照常更新。
+        # 之后每次任务都命中「指纹相同 → 复用连接池」分支，
+        # 那个坏掉的 Server 再也不会被重试，
+        # 除非用户手动去改一次 MCP 配置。
+        #
+        # 现在改成：
+        #   - 记录每个 Server 连续失败的次数；
+        #   - 失败次数未达阈值时冷处理，避免每个 Task 都卡一次冷启动；
+        #   - 达到阈值就再试一次（网络抖动、npx 缓存已预热的情况能自愈）；
+        #   - 配置指纹变化立即清空记录，全量重连。
+        # ------------------------------------------------
+
+        self._mcp_failed = {}
+
+        self._mcp_failed_signature = (
+            None
+        )
+
     # ========================================================
     # 基础状态
     # ========================================================
@@ -395,6 +443,12 @@ class AgentService:
 
             self._cancel_requested = (
                 False
+            )
+
+            # 自动放行是会话级授权，
+            # 新会话必须从头重新授予。
+            self._auto_approve_tools = (
+                set()
             )
 
             # 新会话不应继承上一个会话的
@@ -895,16 +949,31 @@ class AgentService:
 
         初次连接：
         - 单个 Server 失败时丢弃该 Server；
-        - 其它可用 Server 仍继续参与 Task。
+        - 其它可用 Server 仍继续参与 Task；
+        - 失败的 Server 进入冷却队列，若干次任务后自动重试一次。
 
         HITL 恢复重连：
-        - 如果之前已经可用的 Server 无法重新连接，
-          直接抛错，避免批准后的 MCP 操作在半失效状态下继续。
+        - 无法重新连接的 Server 从本轮 Agent 中摘除，
+          并给用户一个明确提示，但不再抛异常中断整单。
+          理由：抛异常会让用户点下「批准」后前面所有工作全部作废，
+          代价远大于「少一个 MCP 工具」。
         """
 
         signature = (
             self._mcp_config_signature()
         )
+
+        # 配置变了 → 之前所有失败记录作废，全部重试。
+        if (
+            self._mcp_failed_signature
+            != signature
+        ):
+
+            self._mcp_failed = {}
+
+            self._mcp_failed_signature = (
+                signature
+            )
 
         if not self.mcp_servers:
 
@@ -967,6 +1036,56 @@ class AgentService:
                 )
             )
 
+            # ----------------------------------------
+            # 失败冷却
+            #
+            # 一个 Server 连续失败之后，不能每个 Task 都为它
+            # 白等一次冷启动超时（实测 20 秒以上）。
+            # 冷却期内直接跳过，累计到阈值再给它一次机会，
+            # 这样网络抖动 / npx 缓存预热完成后能自动康复。
+            # ----------------------------------------
+
+            failed_count = (
+                self._mcp_failed.get(
+                    server_name,
+                    0,
+                )
+            )
+
+            if (
+                failed_count
+                and failed_count
+                < MCP_RETRY_AFTER_FAILURES
+            ):
+
+                self._mcp_failed[
+                    server_name
+                ] = (
+                    failed_count + 1
+                )
+
+                events.append(
+                    {
+                        "event": (
+                            "mcp_connection_failed"
+                        ),
+                        "task_id":
+                            self.task_id,
+                        "server":
+                            server_name,
+                        "error": (
+                            f"上次连接失败，暂时跳过"
+                            f"（冷却 {failed_count}"
+                            f"/{MCP_RETRY_AFTER_FAILURES}，"
+                            f"之后自动重试）"
+                        ),
+                        "time":
+                            now_text(),
+                    }
+                )
+
+                continue
+
             # npx / uvx 这类 stdio Server 在包缓存冷启动时
             # 首次拉起经常超过默认超时，从而被误判为不可用。
             # 初次连接允许重试一次；HITL 恢复时不做额外重试，
@@ -1001,6 +1120,12 @@ class AgentService:
 
             if connected_ok:
 
+                # 康复成功，清掉失败记录。
+                self._mcp_failed.pop(
+                    server_name,
+                    None,
+                )
+
                 connected.append(
                     server
                 )
@@ -1034,6 +1159,12 @@ class AgentService:
                 )
 
             else:
+
+                # 记一次失败。达到阈值后重试仍失败时重置为 1，
+                # 重新进入冷却，避免每个 Task 都硬等一次超时。
+                self._mcp_failed[
+                    server_name
+                ] = 1
 
                 failures.append(
                     (
@@ -1084,8 +1215,19 @@ class AgentService:
         if reconnect and failures:
 
             # 恢复审批时，RunState 可能正等待调用某个 MCP Tool。
-            # 此时不能静默丢弃已失效的 Server。
-            personal_agent.mcp_servers = []
+            #
+            # 旧实现在这里直接 raise，实际后果是：
+            # 用户点下「批准」→ 前面所有工作全部作废 → 整单报错。
+            #
+            # 改为降级：把失效 Server 从本轮 Agent 摘除并明确告知，
+            # 任务继续跑完。模型若再去调已失效的 Tool，
+            # 只会拿到「工具不存在」的软错误，
+            # 远比整单崩掉可控。
+            #
+            # 摘除由下方
+            #   self.mcp_servers = connected
+            #   personal_agent.mcp_servers = connected
+            # 自然完成，不需要额外清空。
 
             names = ", ".join(
                 name
@@ -1093,9 +1235,31 @@ class AgentService:
                 in failures
             )
 
-            raise RuntimeError(
-                "MCP 审批恢复时重新连接失败："
-                f"{names}"
+            write_log(
+                {
+                    "event": (
+                        "mcp_resume_degraded"
+                    ),
+                    "servers": names,
+                }
+            )
+
+            events.append(
+                {
+                    "event": (
+                        "mcp_connection_failed"
+                    ),
+                    "task_id":
+                        self.task_id,
+                    "server": names,
+                    "error": (
+                        "审批恢复时重新连接失败，"
+                        f"本轮已停用：{names}。"
+                        "任务将继续，但这些 Server 的工具不可用。"
+                    ),
+                    "time":
+                        now_text(),
+                }
             )
 
         # 初始连接失败的 Server 从当前 Task 中移除。
@@ -1537,10 +1701,32 @@ class AgentService:
                 == "approval_required"
             ):
 
-                # 进入 HITL：保持 MCP 连接不断，
-                # 否则用户点「批准」后还要再等一次冷启动。
+                # 先尝试会话内自动放行。
+                # 放不掉就交回人工，由 sink 带回审批卡片。
+                #
+                # 原先这里直接 yield terminal 并 return，
+                # 于是自动放行根本没有介入的机会。
 
-                yield terminal
+                sink = {}
+
+                async for (
+                    resume_event
+                ) in (
+                    self._resume_after_approval(
+                        task_id,
+                        sink,
+                    )
+                ):
+
+                    yield resume_event
+
+                if sink.get(
+                    "terminal"
+                ):
+
+                    yield sink[
+                        "terminal"
+                    ]
 
                 return
 
@@ -1613,6 +1799,360 @@ class AgentService:
         self._cancel_requested = True
         from agent_tools.coding_tools import cancel_active_shells
         cancel_active_shells()
+
+    # ========================================================
+    # 会话内自动放行
+    # ========================================================
+
+    def set_auto_approve(
+        self,
+        tool_name: str,
+        enabled: bool,
+    ) -> None:
+        """
+        设置某个工具在本次会话内是否自动放行。
+        """
+
+        if not tool_name:
+            return
+
+        with self.lock:
+
+            if enabled:
+
+                self._auto_approve_tools.add(
+                    tool_name
+                )
+
+            else:
+
+                self._auto_approve_tools.discard(
+                    tool_name
+                )
+
+    def auto_approve_tools(
+        self,
+    ) -> list:
+
+        return sorted(
+            self._auto_approve_tools
+        )
+
+    async def _auto_approve_pending(
+        self,
+        task_id,
+        sink: dict,
+    ):
+        """
+        把 pending_interruptions 队首中命中放行名单的项依次放行。
+
+        只从队首处理，遇到第一个不在名单里的就停下，
+        保证审批顺序与模型调用顺序一致。
+
+        sink["approved"] 记录是否至少放行了一个。
+        """
+
+        sink["approved"] = False
+
+        while True:
+
+            with self.lock:
+
+                if (
+                    not self.pending_interruptions
+                    or self.pending_state
+                    is None
+                ):
+                    return
+
+                interruption = (
+                    self.pending_interruptions[
+                        0
+                    ]
+                )
+
+                name = (
+                    interruption.name
+                    or ""
+                )
+
+                if (
+                    name
+                    not in (
+                        self._auto_approve_tools
+                    )
+                ):
+                    return
+
+                self.pending_interruptions.pop(
+                    0
+                )
+
+                state = (
+                    self.pending_state
+                )
+
+            state.approve(
+                interruption
+            )
+
+            write_log(
+                {
+                    "event": (
+                        "approval_auto_approved"
+                    ),
+                    "tool": name,
+                }
+            )
+
+            yield {
+                "event": (
+                    "approval_auto_approved"
+                ),
+                "task_id": task_id,
+                "tool": name,
+                "time": now_text(),
+            }
+
+            sink["approved"] = True
+
+            if (
+                not self.pending_interruptions
+            ):
+                return
+
+    async def _resume_after_approval(
+        self,
+        task_id,
+        sink: dict,
+    ):
+        """
+        审批处理完成后恢复 Runner 的统一入口。
+
+        被两处复用：
+        - stream_task / stream_approval 进入 approval_required 之后
+          （先尝试自动放行，放不掉就交回人工）；
+        - 自动放行之后继续跑。
+
+        sink["terminal"] 非空表示又一次需要人工审批，
+        由调用方负责 yield。
+        """
+
+        if (
+            self.pending_state
+            is None
+        ):
+            return
+
+        while True:
+
+            # ----------------------------------------
+            # 先消化能自动放行的审批
+            # ----------------------------------------
+
+            approve_sink = {
+                "approved": False
+            }
+
+            async for event in (
+                self._auto_approve_pending(
+                    task_id,
+                    approve_sink,
+                )
+            ):
+
+                yield event
+
+            # 队首仍需人工决定 → 交回上层弹审批卡片
+
+            if (
+                self.pending_interruptions
+            ):
+
+                sink[
+                    "terminal"
+                ] = (
+                    self._approval_payload(
+                        self.pending_interruptions[
+                            0
+                        ]
+                    )
+                )
+
+                return
+
+            state = self.pending_state
+
+            self.running = True
+
+            self._cancel_requested = (
+                False
+            )
+
+            try:
+
+                # HITL 暂停时 MCP 已断开。
+                # 在同一个审批恢复 async 阶段重新连接。
+
+                mcp_events = await (
+                    self._connect_mcp_servers(
+                        reconnect=True
+                    )
+                )
+
+                for mcp_event in mcp_events:
+                    yield mcp_event
+
+                result = None
+
+                async for event in (
+                    self._run_streamed(
+                        state
+                    )
+                ):
+
+                    # 审批恢复后的这一段同样必须响应「停止任务」。
+
+                    if (
+                        self._cancel_requested
+                    ):
+
+                        yield {
+                            "event":
+                                "task_cancelled",
+                            "task_id":
+                                task_id,
+                            "time":
+                                now_text(),
+                        }
+
+                        result = None
+
+                        break
+
+                    if (
+                        event.get(
+                            "event"
+                        )
+                        == "_runner_finished"
+                    ):
+
+                        result = event[
+                            "result"
+                        ]
+
+                    else:
+
+                        yield event
+
+                if (
+                    result is None
+                    and self._cancel_requested
+                ):
+
+                    self._clear_pending()
+
+                    self._cancel_requested = (
+                        False
+                    )
+
+                    self.running = False
+
+                    yield {
+                        "status":
+                            "cancelled",
+                        "task_id":
+                            task_id,
+                        "message": (
+                            "已停止当前任务。"
+                        ),
+                        "time":
+                            now_text(),
+                    }
+
+                    return
+
+                if result is None:
+
+                    # 没有取消、也没有结果，说明 Runner 异常结束。
+                    # 不抛异常：一抛就走 except 分支，
+                    # 用户之前的全部工作都会作废。
+
+                    self._clear_pending()
+
+                    self._cancel_requested = (
+                        False
+                    )
+
+                    self.running = False
+
+                    yield {
+                        "status":
+                            "error",
+                        "task_id":
+                            task_id,
+                        "message": (
+                            "审批恢复后 Runner "
+                            "未返回结果，本轮已中止。"
+                            "已完成的改动不受影响，"
+                            "可以重新发起任务。"
+                        ),
+                        "time":
+                            now_text(),
+                    }
+
+                    return
+
+                terminal = (
+                    self._finalize_result(
+                        result
+                    )
+                )
+
+                if (
+                    terminal.get(
+                        "status"
+                    )
+                    != "approval_required"
+                ):
+
+                    await self._disconnect_mcp_servers(
+                        keep_for_resume=(
+                            False
+                        )
+                    )
+
+                    self._clear_pending()
+
+                    yield terminal
+
+                    return
+
+                # 又进入审批：
+                # 回到循环顶部，再判断能否自动放行。
+
+                continue
+
+            except Exception as e:
+
+                # 出错时连接状态不可信，销毁连接池。
+                self._mcp_pool = []
+
+                self._mcp_pool_signature = (
+                    None
+                )
+
+                await self._disconnect_mcp_servers(
+                    keep_for_resume=(
+                        False
+                    )
+                )
+
+                yield self._handle_failure(
+                    e
+                )
+
+                return
 
     def is_busy(
         self,
@@ -1688,10 +2228,19 @@ class AgentService:
                 interruption
             )
 
+            if remember:
+
+                self.set_auto_approve(
+                    tool_name,
+                    True,
+                )
+
             write_log(
                 {
                     "event": (
                         "approval_approved"
+                        if not remember
+                        else "approval_approved_remembered"
                     ),
                     "tool": tool_name,
                 }
@@ -1734,101 +2283,38 @@ class AgentService:
             }
 
         # ====================================================
-        # 同一轮还有别的审批
+        # 恢复 Runner
         # ====================================================
-
-        if self.pending_interruptions:
-
-            next_interruption = (
-                self.pending_interruptions[0]
-            )
-
-            yield self._approval_payload(
-                next_interruption
-            )
-
-            return
-
-        # ====================================================
-        # 所有审批处理完成，恢复原 Runner
-        # ====================================================
-
-        with self.lock:
-
-            self.running = True
-
-            self._cancel_requested = (
-                False
-            )
-
-            state = self.pending_state
 
         try:
 
-            # HITL 暂停时 MCP 已断开。
-            # 在同一个审批恢复 async 阶段重新连接。
-            mcp_events = await (
-                self._connect_mcp_servers(
-                    reconnect=True
-                )
-            )
+            # 统一走 _resume_after_approval：
+            # - 先消化命中放行名单的后续审批；
+            # - 仍有需要人工决定的 → 由 sink 交回上层弹卡片；
+            # - 全部放行 → 继续跑，并循环处理下一轮审批。
+            #
+            # 原先这里手写了整段续跑逻辑，
+            # 导致「同一轮多个审批」「自动放行」「取消」三条路径
+            # 各写一遍，改一处漏两处。
 
-            for mcp_event in mcp_events:
-                yield mcp_event
-
-            result = None
+            sink = {}
 
             async for event in (
-                self._run_streamed(
-                    state
+                self._resume_after_approval(
+                    task_id,
+                    sink,
                 )
             ):
 
-                if (
-                    event.get("event")
-                    == "_runner_finished"
-                ):
+                yield event
 
-                    result = event[
-                        "result"
-                    ]
-
-                else:
-
-                    yield event
-
-            if result is None:
-
-                raise RuntimeError(
-                    "审批恢复后没有获得"
-                    "最终 Runner 结果。"
-                )
-
-            terminal = (
-                self._finalize_result(
-                    result
-                )
-            )
-
-            if (
-                terminal.get("status")
-                == "approval_required"
+            if sink.get(
+                "terminal"
             ):
 
-                # 进入 HITL：保持 MCP 连接不断，
-                # 否则用户点「批准」后还要再等一次冷启动。
-
-                yield terminal
-
-                return
-
-            await self._disconnect_mcp_servers(
-                keep_for_resume=False
-            )
-
-            self._clear_pending()
-
-            yield terminal
+                yield sink[
+                    "terminal"
+                ]
 
         except Exception as e:
 

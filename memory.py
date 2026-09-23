@@ -790,41 +790,37 @@ async def get_chat_history(
         except Exception:
             pass
 
+    return chat_messages_from_items(items)
+
+
+def chat_messages_from_items(items):
+    """Build display history without losing final answers returned by finish_task."""
     messages = []
-
+    finish_calls = set()
+    turn_start = 0
     for item in items:
-
-        if not isinstance(
-            item,
-            dict,
-        ):
+        if not isinstance(item, dict):
             continue
-
-        role = item.get(
-            "role"
-        )
-
-        if role not in {
-            "user",
-            "assistant",
-        }:
+        if item.get("type") == "function_call" and item.get("name") == "finish_task" and item.get("call_id"):
+            finish_calls.add(item.get("call_id"))
             continue
-
-        text = _content_to_text(
-            item.get(
-                "content"
-            )
-        )
-
+        if item.get("type") == "function_call_output" and item.get("call_id") in finish_calls:
+            answer = _content_to_text(item.get("output"))
+            if answer:
+                messages[turn_start:] = [{"role": "assistant", "content": answer}]
+            continue
+        role = item.get("role")
+        if role not in {"user", "assistant"}:
+            continue
+        text = _content_to_text(item.get("content"))
         if not text:
             continue
-
-        messages.append(
-            {
-                "role": role,
-                "content": text,
-            }
-        )
+        if role == "user":
+            finish_calls.clear()
+            messages.append({"role": role, "content": text})
+            turn_start = len(messages)
+        else:
+            messages.append({"role": role, "content": text})
 
     return messages
 

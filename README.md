@@ -1,15 +1,24 @@
 # 小智 · 本地 Agent 工作台
 
-## 启动
-
-在 PowerShell 中运行：
+## 安装
 
 ```powershell
-cd D:\myagent-clean
-& D:\anaconda\envs\myagent\python.exe gui.py
+cd 项目目录
+python -m pip install -r requirements.txt          # 常规安装（宽松下界）
+python -m pip install -r requirements.lock.txt     # 复现已验证环境（全量精确锁）
 ```
 
-默认仅监听本机 `127.0.0.1:7865`。端口被占用时会报错，不会自动切到其他端口。
+`requirements.txt` 只列项目直接 import 的包；`requirements.lock.txt` 是当前开发环境的完整快照。
+
+## 启动
+
+在 PowerShell 中运行（先激活装有依赖的那个 Python 环境）：
+
+```powershell
+python gui.py
+```
+
+默认仅监听本机 `127.0.0.1:7865`。想换端口可设置环境变量 `GRADIO_SERVER_PORT`（例如 `$env:GRADIO_SERVER_PORT=7866`）；端口被占用时会报错，不会自动切到其他端口。
 首次使用可直接打开界面，在「设置 → 模型」填写兼容接口、模型名与 API Key，保存后重启。
 API Key 使用系统安全存储；兼容已有 `.env`。依赖见 `requirements.txt`。
 
@@ -21,7 +30,7 @@ API Key 使用系统安全存储；兼容已有 `.env`。依赖见 `requirements
 | 搜索与资料 | 联网搜索、网页正文、来源链接、GitHub 热门项目 |
 | 记忆 | 明确告诉小智「记住」或「保存笔记」，以后可查询 |
 | 文件与代码 | 列出、读取、写入、搜索、按行阅读、精确替换工作区文件 |
-| 终端与测试 | PowerShell、Python、Git 等命令；每次审批，最长 120 秒，支持停止 |
+| 终端与测试 | PowerShell、Python、Git 等命令；每次审批，最长 120 秒，支持停止；可在审批卡片勾选「本次会话内自动放行」 |
 | 多步骤任务 | 自动制定和更新计划，在「工具」页刷新查看；执行过程有追踪记录 |
 | MCP | 配置、启停和测试服务；调用工具、列出和读取资源、获取提示模板 |
 | 附件与成果 | 「文件」页上传并导入，引用自动加入输入框；选择成果后准备下载 |
@@ -30,6 +39,11 @@ API Key 使用系统安全存储；兼容已有 `.env`。依赖见 `requirements
 下载成果单个最多 100 MB。文本预览超过 10 万字符时截断，可下载完整文件。
 二进制附件不会自动变成模型可读文本，需要相应本地解析工具。
 终端使用当前 Windows 用户权限，**并非系统沙箱**；批准前请检查命令内容。
+终端另有一层静态审计：读取凭据类文件（`.env`、`id_rsa`、`*.pem`、`.aws/`、`.ssh/` 等）、
+「下载即执行」、系统级破坏性操作（`diskpart`、`reg delete`、`taskkill`、`rm -rf /` 等）会被直接拒绝；
+删除、写入、移动类命令的目标绝对路径必须落在 `workspace/` 或临时目录内。读取工作区外的文件不受限制。
+
+「本次会话内自动放行」按工具名生效，仅对当前会话有效，「新任务」后自动清空。
 模型可用性、联网搜索及 MCP 能力取决于各自接口和本机依赖。
 
 ## 外观
@@ -50,9 +64,10 @@ GIF 动图由浏览器播放，动态背景开关只控制视频。
 ## 验证
 
 ```powershell
-& D:\anaconda\envs\myagent\python.exe -m unittest discover -s tests -v
+python -m unittest discover -s tests -v
 node --test tests/appearance.test.cjs
 ```
 
-测试覆盖文件边界、编辑冲突、附件限制、终端成功/失败/超时/取消、审批标记及外观状态逻辑。
+测试覆盖文件边界、编辑冲突、附件限制、终端成功/失败/超时/取消、审批标记及外观状态逻辑，
+以及终端安全审计、工具结果分类、依赖清单完整性、会话内自动放行的回归。
 前端状态测试不替代真实浏览器的视觉验收。

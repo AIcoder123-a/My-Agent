@@ -145,6 +145,9 @@ personal_agent = Agent(
     必须调用 finish_task。
 
     finish_task 每个任务只能调用一次。
+    summary 参数必须是完整的、直接面向用户的最终答案，保留必要的代码、结论和来源。
+    不要将思考过程、执行计划或“我接下来会……”当作 summary。
+    工具执行前的简短说明仅用于展示执行进展，不能代替最终答案。
 
     调用 finish_task
     表示整个当前任务结束。

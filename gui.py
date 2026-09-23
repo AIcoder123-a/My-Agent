@@ -669,49 +669,9 @@ def dropdown_state(
 # 文本异常修复
 # ============================================================
 
-def normalize_agent_text(
-    value: Any,
-) -> str:
-    """
-    修复少数第三方 OpenAI-compatible API
-    在 Tool/HITL Streaming 后产生的
-    “一个字一行”异常。
-
-    正常文本不会修改。
-    """
-
-    if value is None:
-        return ""
-
-    text = str(value)
-
-    lines = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip()
-    ]
-
-    if len(lines) < 12:
-        return text
-
-    tiny_lines = sum(
-        1
-        for line in lines
-        if len(line) <= 4
-    )
-
-    ratio = (
-        tiny_lines / len(lines)
-        if lines
-        else 0
-    )
-
-    if ratio >= 0.80:
-        return "".join(
-            lines
-        )
-
-    return text
+def normalize_agent_text(value: Any) -> str:
+    """Keep provider text intact, including Markdown, code and intentional line breaks."""
+    return "" if value is None else str(value)
 
 # ============================================================
 # Chat History
@@ -765,124 +725,22 @@ def clone_history(
         }:
             continue
 
-        result.append(
-            {
-                "role": role,
-                "content": content,
-            }
-        )
+        message = {"role": role, "content": content}
+        metadata = item.get("metadata") if isinstance(item, dict) else getattr(item, "metadata", None)
+        if metadata:
+            message["metadata"] = dict(metadata)
+        result.append(message)
 
     return result
-
-def ensure_assistant_message(
-    history,
-):
-
-    if (
-        not history
-        or history[-1].get(
-            "role"
-        )
-        != "assistant"
-    ):
-
-        history.append(
-            {
-                "role": "assistant",
-                "content": "",
-            }
-        )
-
-    return history
 
 # ============================================================
 # Trace
 # ============================================================
 
-def move_progress_message_to_trace(
-    history,
-    trace_state,
-    time_text="",
-):
-    """
-    如果模型在调用工具前输出了“我先搜索一下”“让我打开页面”等
-    过程性文字，把它从聊天区移到执行过程。
+def progress_message(content="正在理解任务，请稍候…"):
+    return {"role": "assistant", "content": content,
+            "metadata": {"title": "思考中 · 执行进展", "status": "pending"}}
 
-    这样聊天区只保留用户消息与最终答案，更接近 Codex。
-    """
-
-    history = list(
-        history or []
-    )
-
-    if not history:
-        return (
-            history,
-            trace_state,
-            False,
-        )
-
-    last = history[-1]
-
-    if not isinstance(
-        last,
-        dict,
-    ):
-        return (
-            history,
-            trace_state,
-            False,
-        )
-
-    if (
-        last.get("role")
-        != "assistant"
-    ):
-        return (
-            history,
-            trace_state,
-            False,
-        )
-
-    content = str(
-        last.get(
-            "content",
-            "",
-        )
-        or ""
-    ).strip()
-
-    if not content:
-        return (
-            history,
-            trace_state,
-            False,
-        )
-
-    # 只移动短的过程性消息，避免误删真正的长回答。
-    # 真正最终答案一般明显更长，并且后面不会继续调用工具。
-    if len(content) > 420:
-        return (
-            history,
-            trace_state,
-            False,
-        )
-
-    history.pop()
-
-    trace_state = add_trace(
-        trace_state,
-        time_text=time_text,
-        status="进度",
-        tool="智能体",
-        detail=content,
-    )
-
-    return (
-        history,
-        trace_state,
-        True,
-    )
 
 def add_trace(
     trace_state,
@@ -1563,7 +1421,10 @@ async def render_service_stream(
         empty_sources_text()
     )
 
-    assistant_streaming = False
+    # Everything after the latest user message belongs to this task.
+    turn_start = next((i + 1 for i in range(len(history) - 1, -1, -1)
+                       if history[i].get("role") == "user"), len(history))
+    streamed_text = ""
 
     # --------------------------------------------------------
     # 停止按钮可用性
@@ -1730,30 +1591,11 @@ async def render_service_stream(
             == "text_delta"
         ):
 
-            history = (
-                ensure_assistant_message(
-                    history
-                )
-            )
-
-            delta = event.get(
-                "delta",
-                "",
-            )
-
+            delta = event.get("delta", "")
             if delta:
-
-                history[-1][
-                    "content"
-                ] += delta
-
-                assistant_streaming = (
-                    True
-                )
-
-                status_text = (
-                    "正在生成回答…"
-                )
+                streamed_text += delta
+                history[turn_start:] = [progress_message(streamed_text)]
+                status_text = "思考中 · 正在组织回答…"
 
         # ====================================================
         # Agent Updated
@@ -1888,21 +1730,11 @@ async def render_service_stream(
             == "tool_started"
         ):
 
-            (
-                history,
-                trace_state,
-                moved_progress,
-            ) = move_progress_message_to_trace(
-                history,
-                trace_state,
-                event.get(
-                    "time",
-                    "",
-                ),
-            )
-
-            if moved_progress:
-                assistant_streaming = False
+            if streamed_text:
+                trace_state = add_trace(trace_state, time_text=event.get("time", ""),
+                                        status="进度", tool="智能体", detail=streamed_text)
+            streamed_text = ""
+            history[turn_start:] = [progress_message("正在执行：" + tool_text(event.get("tool")))]
 
             tool_name = tool_text(
                 event.get(
@@ -2181,40 +2013,8 @@ async def render_service_stream(
                 )
             )
 
-            # 没有 Streaming 文本时，用 final_output 兜底
-            if (
-                final_message
-                and not assistant_streaming
-            ):
-
-                history.append(
-                    {
-                        "role": "assistant",
-                        "content": (
-                            final_message
-                        ),
-                    }
-                )
-
-            # 有 Streaming 时，修复可能存在的一字一行
-            elif (
-                history
-                and history[-1].get(
-                    "role"
-                )
-                == "assistant"
-            ):
-
-                history[-1][
-                    "content"
-                ] = (
-                    normalize_agent_text(
-                        history[-1].get(
-                            "content",
-                            "",
-                        )
-                    )
-                )
+            final_message = final_message or streamed_text or "任务已完成，但未返回答案。"
+            history[turn_start:] = [{"role": "assistant", "content": final_message}]
 
             trace_state = add_trace(
                 trace_state,
@@ -2362,6 +2162,11 @@ async def render_service_stream(
 
             force_flush = True
 
+        if terminal_status or event_code == "task_cancelled":
+            for message in history[turn_start:]:
+                if message.get("metadata"):
+                    message["metadata"] = {**message["metadata"], "status": "done", "title": status_text}
+
         # ====================================================
         # UI 节流
         # ====================================================
@@ -2479,6 +2284,11 @@ async def send_task(
         message or ""
     ).strip()
 
+    if service.is_busy():
+        gr.Warning("当前任务尚未结束，请先停止任务或处理待审批操作。")
+        yield tuple(gr.skip() for _ in SEND_OUTPUTS)
+        return
+
     # --------------------------------------------------------
     # 空输入
     # --------------------------------------------------------
@@ -2586,9 +2396,11 @@ async def send_task(
         }
     )
 
+    history.append(progress_message())
+
     yield (
         history,
-        "正在启动任务…",
+        "思考中 · 正在准备任务…",
         service.get_session_id(),
         current_task_text(),
         (
@@ -2621,7 +2433,7 @@ async def send_task(
 
         yield (
             *update,
-            "",
+            gr.skip(),
         )
 
 # ============================================================
@@ -2632,12 +2444,16 @@ async def handle_approval(
     approved: bool,
     history,
     trace_state,
+    remember: bool = False,
 ):
 
     async for update in (
         render_service_stream(
             service.stream_approval(
-                approved=approved
+                approved=approved,
+                remember=bool(
+                    remember
+                ),
             ),
             history,
             trace_state,
@@ -2649,6 +2465,7 @@ async def handle_approval(
 async def approve_task(
     history,
     trace_state,
+    remember=False,
 ):
 
     async for update in (
@@ -2656,6 +2473,9 @@ async def approve_task(
             True,
             history,
             trace_state,
+            remember=bool(
+                remember
+            ),
         )
     ):
 
@@ -2768,6 +2588,12 @@ async def switch_conversation_ui(
     从左侧历史列表切换 Conversation。
     """
 
+    if service.is_busy():
+        gr.Warning("当前任务尚未结束，暂时不能切换会话。请先停止任务或处理审批。")
+        updates = [gr.skip() for _ in SESSION_SWITCH_OUTPUTS]
+        updates[8] = conversation_dropdown_state()
+        return tuple(updates)
+
     if not session_id:
 
         history = (
@@ -2836,30 +2662,11 @@ async def switch_conversation_ui(
         )
 
     except Exception as error:
-
-        history = (
-            await service
-            .get_current_chat_history()
-        )
-
-        return (
-            history,
-            service.get_session_id(),
-            "—",
-            (
-                "切换会话失败："
-                f"{error}"
-            ),
-            approval_view(),
-            [],
-            [],
-            empty_sources_text(),
-            conversation_dropdown_state(),
-            current_conversation_title(),
-            False,
-            approval_button_state(False),
-            approval_button_state(False),
-        )
+        gr.Warning(f"切换会话失败：{error}")
+        updates = [gr.skip() for _ in SESSION_SWITCH_OUTPUTS]
+        updates[3] = f"切换会话失败：{error}"
+        updates[8] = conversation_dropdown_state()
+        return tuple(updates)
 
 def rename_conversation_ui(
     title,
@@ -7663,6 +7470,27 @@ with gr.Blocks(
                     )
                 )
 
+                # 「本次会话内自动放行此类操作」
+                #
+                # 内置写工具的 needs_approval 是静态写死的，
+                # 改 10 个文件原本要连点 10 次批准。
+                # 勾选后该工具在本次会话内不再打断，
+                # 新建会话即失效，不会跨会话保留授权。
+                auto_approve_checkbox = (
+                    gr.Checkbox(
+                        label=(
+                            "本次会话内自动放行"
+                            "此类操作"
+                        ),
+                        value=False,
+                        elem_id=(
+                            "auto-approve-toggle"
+                        ),
+                        scale=1,
+                        min_width=220,
+                    )
+                )
+
             # --------------------------------------------
             # Composer
             # --------------------------------------------
@@ -8831,6 +8659,14 @@ with demo:
                 trace_state,
             ],
             outputs=SEND_OUTPUTS,
+            # 任务流独占一个并发组：
+            # 组内串行（同一时刻只允许一个 Task 在跑，
+            # AgentService 本来就是单任务状态机），
+            # 但不再占用全局并发额度——
+            # 否则任务流式期间刷新文件列表、读审计日志、
+            # 保存设置全都被排队卡死，表现为"界面假死"。
+            concurrency_id="agent-stream",
+            concurrency_limit=1,
         )
     )
 
@@ -8870,9 +8706,23 @@ with demo:
             inputs=[
                 chatbot,
                 trace_state,
+                auto_approve_checkbox,
             ],
             outputs=APPROVAL_OUTPUTS,
+            # 与 send_event 同组：审批恢复是同一个任务流的延续，
+            # 必须串行，但也必须共用同一个槽位而不是全局锁。
+            concurrency_id="agent-stream",
+            concurrency_limit=1,
         )
+    )
+
+    # 每次批准后把开关复位，
+    # 避免下一次不相关的审批误用上一次的授权。
+    approve_event.then(
+        fn=lambda: False,
+        outputs=[
+            auto_approve_checkbox,
+        ],
     )
 
     approve_event.then(
@@ -8897,6 +8747,8 @@ with demo:
                 trace_state,
             ],
             outputs=APPROVAL_OUTPUTS,
+            concurrency_id="agent-stream",
+            concurrency_limit=1,
         )
     )
 
@@ -9154,6 +9006,10 @@ with demo:
         new_session_button.click(
             fn=create_session,
             inputs=[],
+            # 新建会话会改写全局单点的 current_session，
+            # 必须与其它会话操作串行。
+            concurrency_id="session-control",
+            concurrency_limit=1,
             outputs=[
                 chatbot,
                 session_box,
@@ -10034,8 +9890,25 @@ KEYBOARD_JS = KEYBOARD_JS.replace("() => {", "() => {\n" + COMPOSER_MENU_JS + "\
 
 if __name__ == "__main__":
 
+    # ============================================================
+    # 并发额度
+    #
+    # 旧值 default_concurrency_limit=1 是全局单槽：
+    # 只要有一条任务在流式输出，
+    # 刷新文件列表 / 读审计日志 / 保存设置全部排队等它结束，
+    # 界面表现就是"点了没反应、整页假死"。
+    # 之前给停止按钮单独开 concurrency_id 只是给症状打补丁。
+    #
+    # 现在按职责分组：
+    #   agent-stream    任务流（send / approve / reject），组内串行
+    #   session-control 会话与设置写入，组内串行
+    #   agent-control   停止等控制指令
+    #   mcp-warmup      后台预热
+    #   其余只读刷新  → 走默认额度，不再被任务流阻塞
+    # ============================================================
+
     demo.queue(
-        default_concurrency_limit=1
+        default_concurrency_limit=8
     )
 
     demo.launch(

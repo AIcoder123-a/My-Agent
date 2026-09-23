@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -115,6 +116,268 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
     return edit_file_impl(path, old_text, new_text)
 
 
+# ============================================================
+# 终端命令静态审计
+#
+# 原先的问题：
+#   run_shell 只校验了 cwd 落在 workspace 内，
+#   命令本身却以当前 Windows 用户的完整权限执行。
+#   一条 `Get-Content D:\myagent-clean\.env` 就能把 API Key 读走，
+#   所谓「工作区边界」对终端形同虚设；
+#   靠 prompt 里写一句「不得越权」是把安全交给模型自觉，
+#   这在产品里不成立。
+#
+# 这里补一层静态审计。设计原则：
+#   - 只拦高置信度的危险模式，避免误伤正常开发命令；
+#   - 读取类命令允许绝对路径（否则连 python.exe 都调不动），
+#     但凭据类文件名一律拒绝；
+#   - 写入 / 删除 / 移动类命令，目标绝对路径必须落在工作区或临时目录内。
+#
+# 说明：这不是完整沙箱（真沙箱需要容器 / 降权进程），
+# 但能把「随手一条命令把密钥读走」「rm -rf 掉工作区外的目录」
+# 这两类最高频事故挡住。
+# ============================================================
+
+# 凭据 / 密钥文件
+_SENSITIVE_FILE_RE = re.compile(
+    r"(\.env(\.|$|[\s\"']))"
+    r"|(secrets?\.)"
+    r"|(credentials?)"
+    r"|(id_(rsa|dsa|ecdsa|ed25519))"
+    r"|(\.pem\b)"
+    r"|(\.pfx\b)"
+    r"|(\.key\b)"
+    r"|(\.npmrc\b)"
+    r"|(\.git-credentials)"
+    r"|(\.htpasswd)"
+    r"|((^|[/\\])\.aws[/\\])"
+    r"|((^|[/\\])\.ssh[/\\])"
+    r"|((^|[/\\])\.gnupg[/\\])"
+    r"|(service[-_]?account)"
+    r"|(token\.json\b)"
+    r"|(\bkeytab\b)",
+    re.IGNORECASE,
+)
+
+# 系统级破坏性 / 高危操作
+_DANGEROUS_RE = re.compile(
+    r"(\bformat-volume\b)"
+    r"|(\bdiskpart\b)"
+    r"|(\bbcdedit\b)"
+    r"|(\breg\s+(delete|add|import)\b)"
+    r"|(\bnet\s+(user|localgroup|share|accounts)\b)"
+    r"|(\bschtasks\b)"
+    r"|(\bsc(\.exe)?\s+(create|delete|config|stop|start|failure)\b)"
+    r"|(\bset-executionpolicy\b)"
+    r"|(\b(stop|restart)-computer\b)"
+    r"|(\bshutdown(\.exe)?\b)"
+    r"|(\btaskkill\b)"
+    r"|(del\s+/[fqs])"
+    r"|(\brm\s+-rf\s+[/\\])"
+    r"|(\bformat\s+[a-z]:)"
+    r"|(cipher\s+/w)"
+    r"|(vssadmin\s+delete)"
+    r"|(wmic\s+\S+\s+delete)",
+    re.IGNORECASE,
+)
+
+# 下载即执行：iwr ... | iex
+_DOWNLOAD_EXEC_RE = re.compile(
+    r"(invoke-expression|iex)\s*[\(\s]+[^)]*"
+    r"(invoke-webrequest|iwr|invoke-restmethod|irm|webclient"
+    r"|downloadstring|downloadfile)",
+    re.IGNORECASE,
+)
+
+# 写入 / 删除 / 移动 / 复制类命令（含 PowerShell 别名）
+_WRITE_CMD_RE = re.compile(
+    r"\b("
+    r"remove-item|rm|del|erase|rd|rmdir|"
+    r"new-item|ni|mkdir|md|"
+    r"set-content|sc|out-file|add-content|"
+    r"move-item|mv|move|ren|rename-item|"
+    r"copy-item|cp|copy|xcopy|robocopy|"
+    r"clear-content"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# 绝对路径：盘符路径或 UNC 路径
+_ABS_PATH_RE = re.compile(
+    r"(?:(?<![A-Za-z0-9_\\])([A-Za-z]:[\\/][^\s\"'`|;&]*))"
+    r"|(?:(\\\\[^\s\"'`|;&]+))"
+)
+
+# 环境变量中含这些词的，一律不传给子进程
+_CREDENTIAL_ENV_MARKERS = (
+    "KEY",
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "PRIVATE",
+)
+
+
+def _is_within(
+    path: Path,
+    root: Path,
+) -> bool:
+
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _allowed_write_roots() -> list:
+
+    from paths import (
+        WORKSPACE_DIR,
+    )
+
+    roots = [
+        Path(
+            WORKSPACE_DIR
+        ).resolve()
+    ]
+
+    for key in (
+        "TEMP",
+        "TMP",
+    ):
+
+        value = os.environ.get(
+            key
+        )
+
+        if value:
+
+            try:
+                roots.append(
+                    Path(
+                        value
+                    ).resolve()
+                )
+            except (
+                OSError,
+                ValueError,
+            ):
+                pass
+
+    return roots
+
+
+def audit_shell_command(
+    command: str,
+) -> None:
+    """
+    对即将执行的终端命令做静态审计。
+
+    通过则静默返回；违规抛 ValueError，
+    由 failure_error_function 转成给模型的软错误，
+    模型能看到拒绝原因并调整命令，而不是整单失败。
+    """
+
+    text = (
+        command or ""
+    ).strip()
+
+    if not text:
+        return
+
+    hit = _DANGEROUS_RE.search(
+        text
+    )
+
+    if hit:
+
+        raise ValueError(
+            "命令被安全策略拦截（系统级危险操作）："
+            f"{hit.group(0)!r}。"
+            "终端不具备执行破坏性系统操作的权限。"
+        )
+
+    hit = _DOWNLOAD_EXEC_RE.search(
+        text
+    )
+
+    if hit:
+
+        raise ValueError(
+            "命令被安全策略拦截："
+            "禁止「下载并立即执行」。"
+            "请先下载到工作区，确认内容后再执行。"
+        )
+
+    hit = _SENSITIVE_FILE_RE.search(
+        text
+    )
+
+    if hit:
+
+        raise ValueError(
+            "命令被安全策略拦截（疑似读取凭据）："
+            f"{hit.group(0)!r}。"
+            "终端不允许读取密钥、令牌、证书等凭据文件。"
+        )
+
+    # 只对「写 / 删 / 移 / 复制」类命令做路径越界检查。
+    # 读取类命令放开绝对路径，否则连 python.exe 都调不动。
+
+    if not _WRITE_CMD_RE.search(
+        text
+    ):
+        return
+
+    roots = _allowed_write_roots()
+
+    for match in _ABS_PATH_RE.finditer(
+        text
+    ):
+
+        raw = (
+            match.group(1)
+            or match.group(2)
+            or ""
+        ).strip().strip(
+            '"'
+        ).strip(
+            "'"
+        )
+
+        if not raw:
+            continue
+
+        try:
+            target = Path(
+                raw
+            ).resolve()
+        except (
+            OSError,
+            ValueError,
+        ):
+            continue
+
+        if any(
+            _is_within(
+                target,
+                root,
+            )
+            for root in roots
+        ):
+            continue
+
+        raise ValueError(
+            "命令被安全策略拦截："
+            f"写入/删除操作的目标 {raw!r} "
+            "超出工作区范围。"
+            f"允许写入的位置：{roots[0]}"
+        )
+
+
 async def _terminate_tree(process):
     if process.returncode is not None:
         return
@@ -137,13 +400,18 @@ async def _terminate_tree(process):
 async def run_shell_impl(command: str, cwd: str = '.', timeout_seconds: int = 60) -> str:
     if not command.strip() or len(command) > 16000:
         raise ValueError('命令不能为空且不能超过 16000 字符。')
+
+    # 安全审计必须在解析 cwd 之前完成，
+    # 违规命令一律不落到进程上。
+    audit_shell_command(command)
+
     directory = safe_workspace_path(cwd)
     if not directory.is_dir():
         raise ValueError('工作目录不存在。')
     timeout = max(1, min(int(timeout_seconds), 120))
     # Do not pass model/MCP credentials through inherited environment variables.
     env = {k: v for k, v in os.environ.items()
-           if not any(word in k.upper() for word in ('KEY', 'TOKEN', 'SECRET', 'PASSWORD', 'CREDENTIAL'))}
+           if not any(word in k.upper() for word in _CREDENTIAL_ENV_MARKERS)}
     env['PYTHONIOENCODING'] = 'utf-8'
     if os.name == 'nt':
         executable = str(Path(os.environ.get('SystemRoot', r'C:\Windows')) /
@@ -185,5 +453,5 @@ async def run_shell_impl(command: str, cwd: str = '.', timeout_seconds: int = 60
 
 @tool(needs_approval=True, failure_error_function=tool_error_to_model)
 async def run_shell(command: str, cwd: str = '.', timeout_seconds: int = 60) -> str:
-    """审批后执行本地 PowerShell 命令，用于代码、测试、Git、数据处理。工作目录位于 workspace，最长 120 秒。终端具有当前系统用户权限，并非文件系统沙箱，必须先说明命令意图；不能通过终端绕过被拒绝的操作。"""
+    """审批后执行本地 PowerShell 命令，用于代码、测试、Git、数据处理。工作目录位于 workspace，最长 120 秒。终端具有当前系统用户权限，并非文件系统沙箱，必须先说明命令意图；不能通过终端绕过被拒绝的操作。安全边界：读取凭据类文件（.env、id_rsa、*.pem 等）会被拒绝；删除/写入类命令的目标绝对路径必须在 workspace 或临时目录内；系统级破坏性操作（diskpart、reg delete、taskkill、rm -rf 根目录等）与「下载即执行」一律被拒绝。读取工作区外的文件是允许的，但不得用于绕过上述限制。"""
     return await run_shell_impl(command, cwd, timeout_seconds)
