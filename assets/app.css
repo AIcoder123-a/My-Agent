@@ -1,0 +1,1836 @@
+/* ============================================================
+   小智 Agent —— 主样式表
+
+   从 gui.py 移出。原本 1800 行样式的字面量横在模块中间，
+   把 GUI 组装逻辑淹没了。
+   ============================================================ */
+/* ==========================================================
+   Design System v2
+   深色 / hairline 边框 / 分层面板 / 单一强调色
+   ========================================================== */
+
+:root {
+    /* 最底层保持实色：玻璃要"糊"的是它上面的彩色光晕 */
+    --bg: #07070b;
+    --bg-elev: rgba(255, 255, 255, .028);
+
+    /* ---- 玻璃色板 ----
+       底色越薄越通透，厚度感来自描边和内高光，不是靠堆不透明度。 */
+    --glass: rgba(255, 255, 255, .055);
+    --glass-2: rgba(255, 255, 255, .085);
+    --glass-3: rgba(255, 255, 255, .12);
+    /* 代码/表格这类需要压暗保证可读性的地方 */
+    --glass-deep: rgba(8, 10, 16, .58);
+
+    /* 玻璃描边：上缘受光、下缘落影，才有厚度 */
+    --glass-bd: rgba(255, 255, 255, .10);
+    --glass-bd-2: rgba(255, 255, 255, .17);
+    --glass-hi: rgba(255, 255, 255, .15);
+    --glass-lo: rgba(0, 0, 0, .20);
+
+    --blur-sm: 12px;
+    --blur: 24px;
+    --blur-lg: 38px;
+    --sat: 175%;
+
+    /* 兼容旧引用的面层色（现已全部半透明） */
+    --panel: rgba(255, 255, 255, .055);
+    --panel-2: rgba(255, 255, 255, .085);
+    --panel-3: rgba(255, 255, 255, .12);
+    --hover: rgba(255, 255, 255, .09);
+
+    /* hairline 边框：用白色低透明度，避免脏灰 */
+    --hair: rgba(255, 255, 255, .075);
+    --bd: rgba(255, 255, 255, .10);
+    --bd-2: rgba(255, 255, 255, .16);
+    --bd-3: rgba(255, 255, 255, .24);
+
+    /* 文字 */
+    --tx: #f2f2f7;
+    --tx-2: #b8b8c6;
+    --muted: #8a8a99;
+    --faint: #6a6a7c;
+
+    /* 强调色（Codex 绿） */
+    --accent: #10a37f;
+    --accent-hi: #17bd93;
+    --accent-lo: #0b7d61;
+    --accent-soft: rgba(16, 163, 127, .13);
+    --accent-bd: rgba(16, 163, 127, .40);
+
+    /* 语义色 */
+    --ok: #46c76e;
+    --warn: #d9a13b;
+    --err: #ef6a78;
+    --mcp: #a97bf5;
+
+    /* 字体 */
+    --sans: "Plus Jakarta Sans", "PingFang SC",
+            "Microsoft YaHei UI", "Segoe UI Variable Text",
+            "Segoe UI", -apple-system, sans-serif;
+    --mono: "JetBrains Mono", "Cascadia Code",
+            "SFMono-Regular", Menlo, Consolas, monospace;
+
+    /* 圆角：外大内小 */
+    --r-xs: 6px;
+    --r-sm: 8px;
+    --r-md: 12px;
+    --r-lg: 16px;
+    --r-xl: 20px;
+
+    /* 阴影：玻璃落影要散而柔，硬边投影会立刻显廉价 */
+    --sh-sm: 0 2px 8px rgba(0, 0, 0, .26);
+    --sh-md: 0 10px 30px rgba(0, 0, 0, .34);
+    --sh-lg: 0 26px 70px rgba(0, 0, 0, .46);
+
+    /* 玻璃边缘：上缘受光 + 下缘落影，这一条是"厚度"的来源 */
+    --gl-edge:
+        inset 0 1px 0 var(--glass-hi),
+        inset 0 -1px 0 var(--glass-lo);
+
+    /* 节律 */
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 24px;
+    --sp-6: 32px;
+}
+
+/* ==========================================================
+   Base / 背景层次
+   ========================================================== */
+
+html, body {
+    background: var(--bg) !important;
+    color: var(--tx);
+    height: 100%;
+}
+
+body {
+    font-family: var(--sans) !important;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+}
+
+.gradio-container {
+    max-width: 100% !important;
+    width: 100% !important;
+    height: 100vh !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    /* 基底光晕铺在这里，而不是 body 伪元素上——
+       只有这一层不会被自身的不透明底色盖住。
+       四角一团冷/暖色 + 中央一层极淡靛蓝，
+       三栏的玻璃才有稳定的色彩可透。 */
+    background:
+        radial-gradient(
+            46% 50% at 16% 20%,
+            rgba(16, 163, 127, .24),
+            transparent 70%
+        ),
+        radial-gradient(
+            44% 48% at 88% 14%,
+            rgba(169, 123, 245, .22),
+            transparent 70%
+        ),
+        radial-gradient(
+            50% 54% at 64% 92%,
+            rgba(46, 132, 255, .20),
+            transparent 72%
+        ),
+        radial-gradient(
+            40% 44% at 4% 88%,
+            rgba(255, 138, 96, .13),
+            transparent 72%
+        ),
+        radial-gradient(
+            62% 46% at 50% 58%,
+            rgba(140, 160, 255, .06),
+            transparent 74%
+        ),
+        #07070b !important;
+    border: none !important;
+    border-radius: 0 !important;
+    overflow: hidden !important;
+    position: relative;
+}
+
+/* Gradio 6 的中间层默认带 16px/32px 内边距和外边距，
+   会把整个应用往下、往右推，必须清零。 */
+.gradio-container > .main,
+.gradio-container .main.app,
+.gradio-container .main > .wrap,
+.gradio-container main.contain {
+    padding: 0 !important;
+    margin: 0 !important;
+    gap: 0 !important;
+    max-width: 100% !important;
+    background: transparent !important;
+    overflow: hidden !important;
+}
+
+.gradio-container main.contain {
+    flex-direction: column !important;
+}
+
+.gradio-container main.contain > .column {
+    gap: 0 !important;
+    background: transparent !important;
+    display: flex !important;
+    flex-direction: column !important;
+    height: 100% !important;
+    max-height: 100% !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+}
+
+/* ==========================================================
+   背景光晕层
+   毛玻璃必须有"东西可糊"。
+   底层铺几团大面积柔光，玻璃面板才能透出色彩层次；
+   否则 backdrop-filter 糊的是一片纯色，等于白加。
+   ========================================================== */
+
+/* 注意：光晕不能放在 body::before/::after 上。
+   .gradio-container 自带不透明底色，会把它整个盖住（只露出边缘 8px）。
+   基底光晕必须铺进 .gradio-container 自己的 background（见下方），
+   这里只保留一层会漂移的动态光斑。 */
+
+/* 漂移光斑：在画面中部缓慢游走，
+   让中栏留白也有活的色彩，不至于死黑。
+   范围小、周期长，只求"察觉不到但确实在动"。 */
+.gradio-container::after {
+    content: "";
+    position: fixed;
+    inset: -15%;
+    pointer-events: none;
+    z-index: 0;
+    background:
+        radial-gradient(
+            24% 28% at 30% 32%,
+            rgba(16, 163, 127, .22),
+            transparent 70%
+        ),
+        radial-gradient(
+            26% 30% at 72% 68%,
+            rgba(46, 132, 255, .18),
+            transparent 72%
+        );
+    filter: blur(42px);
+    animation: drift-a 34s ease-in-out infinite alternate;
+}
+
+@keyframes drift-a {
+    from { transform: translate3d(-2%, -1.5%, 0) scale(1); }
+    to   { transform: translate3d(3%, 2.5%, 0) scale(1.08); }
+}
+@keyframes drift-b {
+    from { transform: translate3d(2.5%, 2%, 0) scale(1.06); }
+    to   { transform: translate3d(-3%, -2%, 0) scale(1); }
+}
+
+/* 尊重系统的"减少动态效果"设置 */
+@media (prefers-reduced-motion: reduce) {
+    .gradio-container::after { animation: none; }
+}
+
+/* 极细颗粒，去掉纯色平面的廉价感 */
+.gradio-container::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+    opacity: .035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+footer { display: none !important; }
+
+/* 滚动条：细、低调 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, .10);
+    border-radius: 99px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, .18);
+    background-clip: content-box;
+}
+
+/* ==========================================================
+   Typography
+   ========================================================== */
+
+h1, h2, h3, h4 {
+    letter-spacing: -.02em;
+    font-weight: 650;
+}
+
+/* ==========================================================
+   通用控件
+   ========================================================== */
+
+button, .gr-button {
+    font-family: var(--sans) !important;
+    font-size: 13px !important;
+    font-weight: 550 !important;
+    letter-spacing: -.005em;
+    border-radius: var(--r-sm) !important;
+    border: 1px solid var(--glass-bd) !important;
+    background: var(--glass) !important;
+    color: var(--tx) !important;
+    min-height: 36px;
+    backdrop-filter: blur(var(--blur-sm)) saturate(150%);
+    -webkit-backdrop-filter: blur(var(--blur-sm)) saturate(150%);
+    box-shadow: var(--gl-edge), var(--sh-sm) !important;
+    transition: background .16s ease,
+                border-color .16s ease,
+                box-shadow .16s ease,
+                transform .08s ease;
+}
+
+button:hover, .gr-button:hover {
+    background: var(--glass-2) !important;
+    border-color: var(--glass-bd-2) !important;
+}
+
+button:active, .gr-button:active {
+    transform: translateY(.5px);
+}
+
+button:focus-visible, .gr-button:focus-visible {
+    outline: none !important;
+    box-shadow: 0 0 0 3px var(--accent-soft) !important;
+    border-color: var(--accent-bd) !important;
+}
+
+button.primary, .gr-button.primary {
+    background: linear-gradient(
+        180deg,
+        var(--accent-hi),
+        var(--accent)
+    ) !important;
+    border: 1px solid rgba(255, 255, 255, .22) !important;
+    color: #03150f !important;
+    font-weight: 650 !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .32),
+        0 2px 6px rgba(0, 0, 0, .40),
+        0 8px 22px rgba(16, 163, 127, .26) !important;
+}
+button.primary:hover, .gr-button.primary:hover {
+    background: linear-gradient(
+        180deg,
+        #1fcb9e,
+        #12ad88
+    ) !important;
+}
+
+button.stop, .gr-button.stop {
+    background: transparent !important;
+    border-color: rgba(239, 106, 120, .34) !important;
+    color: var(--err) !important;
+    box-shadow: none !important;
+}
+button.stop:hover, .gr-button.stop:hover {
+    background: rgba(239, 106, 120, .10) !important;
+    border-color: rgba(239, 106, 120, .55) !important;
+}
+
+label, .gr-block label {
+    font-size: 11.5px !important;
+    font-weight: 550 !important;
+    color: var(--muted) !important;
+    letter-spacing: .02em;
+}
+
+input, textarea, select {
+    font-family: var(--sans) !important;
+    background: var(--glass) !important;
+    backdrop-filter: blur(var(--blur-sm)) saturate(150%);
+    -webkit-backdrop-filter: blur(var(--blur-sm)) saturate(150%);
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-sm) !important;
+    color: var(--tx) !important;
+    font-size: 13.5px !important;
+    box-shadow: var(--gl-edge) !important;
+}
+
+input:focus, textarea:focus, select:focus {
+    border-color: var(--accent-bd) !important;
+    box-shadow: var(--gl-edge), 0 0 0 3px var(--accent-soft) !important;
+    outline: none !important;
+}
+
+input::placeholder, textarea::placeholder {
+    color: var(--faint) !important;
+}
+
+/* Gradio 6 的布局容器本身不应有底色和描边；
+   需要卡片感的地方由具名 id 单独控制。 */
+.block:not(.gr-accordion),
+.form,
+.container,
+.column,
+.row {
+    background: transparent !important;
+    border-color: transparent !important;
+}
+
+/* 左侧栏下拉框：统一成一种克制的输入壳 */
+#left-panel .form {
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-sm) !important;
+    background: var(--glass) !important;
+    backdrop-filter: blur(var(--blur-sm)) saturate(160%);
+    -webkit-backdrop-filter: blur(var(--blur-sm)) saturate(160%);
+    box-shadow: var(--gl-edge) !important;
+    padding: 0 !important;
+    overflow: hidden;
+    margin-bottom: 2px;
+}
+
+#left-panel .form .container,
+#left-panel .form .wrap,
+#left-panel .form .wrap-inner,
+#left-panel .form .secondary-wrap {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+#left-panel .form input,
+#left-panel .form input.border-none {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    font-size: 13px !important;
+    height: 34px !important;
+}
+
+#left-panel .form:focus-within {
+    border-color: var(--accent-bd) !important;
+    box-shadow: 0 0 0 3px var(--accent-soft) !important;
+}
+
+#left-panel .form .icon-wrap {
+    color: var(--muted) !important;
+    opacity: .85;
+}
+
+/* 手风琴真实类名是 gr-accordion */
+.gr-accordion {
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-md) !important;
+    background: var(--glass) !important;
+    backdrop-filter: blur(var(--blur)) saturate(165%);
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(165%);
+    overflow: hidden;
+    box-shadow: var(--gl-edge), var(--sh-sm) !important;
+}
+
+.gr-accordion > .label-wrap,
+.gr-accordion > button.label-wrap {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: var(--tx-2) !important;
+    font-size: 12.5px !important;
+    font-weight: 550 !important;
+    min-height: 36px !important;
+    padding: 0 12px !important;
+    justify-content: flex-start !important;
+    gap: 8px !important;
+}
+
+.gr-accordion > .label-wrap:hover {
+    background: var(--panel-2) !important;
+    color: var(--tx) !important;
+}
+
+.gr-accordion .icon {
+    color: var(--muted) !important;
+}
+
+/* Gradio 的状态遮罩 / 隐藏层不该有任何底色 */
+[data-testid="status-tracker"],
+.wrap.hide,
+.hide {
+    background: transparent !important;
+}
+
+[data-testid="status-tracker"] {
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* 组件标签（含 Gradio 内置的隐藏 label）不显示白底 */
+.block-label,
+label[data-testid="block-label"] {
+    background: transparent !important;
+    color: var(--muted) !important;
+}
+
+.gr-checkbox label, .gr-radio label {
+    color: var(--tx-2) !important;
+    font-size: 13px !important;
+}
+
+/* ==========================================================
+   Top Bar
+   ========================================================== */
+
+#topbar {
+    min-height: 56px !important;
+    height: 56px;
+    padding: 0 20px !important;
+    border-bottom: 1px solid var(--glass-bd) !important;
+    background: linear-gradient(
+        180deg,
+        rgba(255, 255, 255, .075),
+        rgba(255, 255, 255, .032)
+    ) !important;
+    backdrop-filter: blur(var(--blur-lg)) saturate(180%);
+    -webkit-backdrop-filter: blur(var(--blur-lg)) saturate(180%);
+    box-shadow:
+        inset 0 -1px 0 rgba(255, 255, 255, .05),
+        var(--sh-md) !important;
+    align-items: center !important;
+    gap: 14px;
+    position: relative;
+    z-index: 20;
+}
+
+#topbar > div { align-items: center !important; }
+
+#brand-title { margin: 0 !important; }
+#brand-title h3 {
+    margin: 0 !important;
+    font-size: 15.5px !important;
+    font-weight: 680 !important;
+    letter-spacing: -.025em;
+    color: var(--tx) !important;
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+}
+#brand-title h3::before {
+    content: "";
+    width: 18px;
+    height: 18px;
+    border-radius: 6px;
+    background: linear-gradient(
+        140deg,
+        var(--accent-hi),
+        var(--accent-lo)
+    );
+    box-shadow:
+        0 0 0 1px rgba(255, 255, 255, .12),
+        0 3px 10px rgba(16, 163, 127, .38);
+}
+#brand-title p {
+    margin: 0 !important;
+    font-size: 11.5px !important;
+    color: var(--faint) !important;
+    letter-spacing: .01em;
+}
+
+#runtime-status {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 12px;
+}
+
+.chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 26px;
+    padding: 0 11px;
+    border-radius: 99px;
+    background: var(--glass-2);
+    border: 1px solid var(--glass-bd);
+    backdrop-filter: blur(var(--blur-sm)) saturate(160%);
+    -webkit-backdrop-filter: blur(var(--blur-sm)) saturate(160%);
+    box-shadow: var(--gl-edge);
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--tx-2);
+    white-space: nowrap;
+    line-height: 1;
+    letter-spacing: -.005em;
+}
+.chip.ok { color: var(--ok); border-color: rgba(70, 199, 110, .26); }
+.chip.warn { color: var(--warn); border-color: rgba(217, 161, 59, .30); }
+.chip.mcp { color: var(--mcp); border-color: rgba(169, 123, 245, .26); }
+
+.dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--muted);
+    display: inline-block;
+    flex: 0 0 auto;
+}
+.dot.ok {
+    background: var(--ok);
+    box-shadow: 0 0 0 3px rgba(70, 199, 110, .14);
+}
+.dot.busy {
+    background: var(--accent);
+    animation: pulse 1.15s ease-in-out infinite;
+}
+@keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: .4; transform: scale(.8); }
+}
+
+#context-badge { margin: 0 !important; }
+#context-badge p {
+    margin: 0 !important;
+    font-size: 11px !important;
+    color: var(--faint) !important;
+}
+
+/* ==========================================================
+   Shell / 三栏
+   ========================================================== */
+
+#topbar {
+    flex: 0 0 56px !important;
+}
+
+#app-shell {
+    flex: 1 1 auto !important;
+    height: calc(100vh - 56px) !important;
+    max-height: calc(100vh - 56px) !important;
+    min-height: 0 !important;
+    gap: 0 !important;
+    align-items: stretch !important;
+    position: relative;
+    z-index: 5;
+    overflow: hidden !important;
+}
+
+#left-panel,
+#center-panel,
+#right-panel {
+    height: 100% !important;
+    max-height: 100% !important;
+    min-height: 0 !important;
+    align-self: stretch !important;
+}
+
+#left-panel {
+    width: 264px !important;
+    flex: 0 0 264px !important;
+    min-width: 264px !important;
+    max-width: 264px !important;
+    border-right: 1px solid var(--glass-bd) !important;
+    background: linear-gradient(
+        180deg,
+        rgba(255, 255, 255, .062),
+        rgba(255, 255, 255, .026)
+    ) !important;
+    backdrop-filter: blur(var(--blur-lg)) saturate(180%);
+    -webkit-backdrop-filter: blur(var(--blur-lg)) saturate(180%);
+    box-shadow:
+        inset -1px 0 0 rgba(255, 255, 255, .045),
+        28px 0 70px -42px rgba(0, 0, 0, .85),
+        var(--sh-md) !important;
+    padding: 16px 14px !important;
+    gap: 6px !important;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+#center-panel {
+    flex: 1 1 auto !important;
+    width: auto !important;
+    min-width: 0 !important;
+    padding: 0 !important;
+    gap: 0 !important;
+    /* 中栏自带一层光晕。
+       放在这里而不是全局层：全局光斑是 fixed + 低 z-index，
+       到了中栏这块就画不进来了（中栏整片会发死黑）。
+       自己带背景最稳，也让中栏内的玻璃件有东西可糊。 */
+    background:
+        radial-gradient(
+            78% 48% at 6% 10%,
+            rgba(16, 163, 127, .24),
+            transparent 74%
+        ),
+        radial-gradient(
+            74% 46% at 98% 16%,
+            rgba(169, 123, 245, .22),
+            transparent 76%
+        ),
+        radial-gradient(
+            88% 52% at 56% 98%,
+            rgba(46, 132, 255, .21),
+            transparent 78%
+        ),
+        radial-gradient(
+            66% 44% at 52% 50%,
+            rgba(120, 150, 255, .115),
+            transparent 76%
+        ),
+        radial-gradient(
+            60% 42% at 14% 74%,
+            rgba(255, 138, 96, .075),
+            transparent 78%
+        ),
+        transparent !important;
+    display: flex !important;
+    flex-direction: column !important;
+    position: relative;
+    overflow: hidden !important;
+}
+
+#right-panel {
+    width: 380px !important;
+    flex: 0 0 380px !important;
+    min-width: 380px !important;
+    max-width: 380px !important;
+    border-left: 1px solid var(--glass-bd) !important;
+    background: linear-gradient(
+        180deg,
+        rgba(255, 255, 255, .062),
+        rgba(255, 255, 255, .026)
+    ) !important;
+    backdrop-filter: blur(var(--blur-lg)) saturate(180%);
+    -webkit-backdrop-filter: blur(var(--blur-lg)) saturate(180%);
+    box-shadow:
+        inset 1px 0 0 rgba(255, 255, 255, .045),
+        -28px 0 70px -42px rgba(0, 0, 0, .85),
+        var(--sh-md) !important;
+    padding: 16px 14px !important;
+    gap: 12px !important;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+/* 对话舞台：占据中栏剩余空间，是空状态的定位参照 */
+#chat-stage {
+    flex: 1 1 auto !important;
+    min-height: 0 !important;
+    height: auto !important;
+    display: flex !important;
+    flex-direction: column !important;
+    padding: 0 !important;
+    gap: 0 !important;
+    background: transparent !important;
+    position: relative;
+    overflow: hidden !important;
+}
+
+/* 底部这些必须是固定高度，否则会被 flex 拉长 */
+#approval-bar,
+#composer-shell,
+#composer-hint-row {
+    flex: 0 0 auto !important;
+}
+
+.section-label {
+    font-size: 10px;
+    font-weight: 650;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--faint);
+    padding: 14px 4px 5px;
+    line-height: 1.2;
+}
+.section-label:first-child { padding-top: 2px; }
+
+/* Gradio 把 gr.HTML 包在 .block/.html-container 里，
+   这些包裹层不能撑高，否则会顶开分组间距。 */
+.block.hide-container,
+.block.hide-container .wrap,
+.block.hide-container .html-container {
+    min-height: 0 !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+    margin: 0 !important;
+}
+
+.block.hide-container .html-container > .prose,
+.block.hide-container .prose {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* 左栏整体：按钮更紧凑，避免长列表显得拥挤 */
+#left-panel button {
+    min-height: 34px !important;
+    height: 34px !important;
+    font-size: 12.5px !important;
+    padding: 0 12px !important;
+    justify-content: flex-start !important;
+    text-align: left !important;
+    box-shadow: var(--gl-edge) !important;
+}
+
+#left-panel button.primary {
+    justify-content: center !important;
+    text-align: center !important;
+    min-height: 38px !important;
+    height: 38px !important;
+}
+
+/* ==========================================================
+   Welcome（空状态，覆盖在对话区上）
+   ========================================================== */
+
+#welcome {
+    position: absolute;
+    inset: 0;
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 32px;
+    pointer-events: none;
+    background: transparent;
+}
+
+/* 只要有对话内容，空状态就消失（CSS 层兜底，不依赖 JS） */
+#chat-stage:has(#chatbot .message) #welcome,
+#chat-stage:has(#chatbot .message-wrap) #welcome {
+    display: none !important;
+}
+
+.welcome-inner {
+    width: 100%;
+    max-width: 720px;
+    pointer-events: auto;
+    animation: rise .45s cubic-bezier(.22, 1, .36, 1);
+}
+
+@keyframes rise {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: none; }
+}
+
+.welcome-mark {
+    width: 46px;
+    height: 46px;
+    border-radius: 13px;
+    background: linear-gradient(
+        140deg,
+        var(--accent-hi),
+        var(--accent-lo)
+    );
+    box-shadow:
+        0 0 0 1px rgba(255, 255, 255, .14),
+        0 10px 30px rgba(16, 163, 127, .34);
+    margin-bottom: 20px;
+    position: relative;
+}
+.welcome-mark::after {
+    content: "›";
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 24px;
+    font-weight: 700;
+    color: #04150f;
+}
+
+.welcome-title {
+    font-size: 30px;
+    font-weight: 680;
+    letter-spacing: -.035em;
+    line-height: 1.15;
+    margin: 0 0 10px;
+    color: var(--tx);
+}
+
+.welcome-sub {
+    font-size: 14.5px;
+    line-height: 1.65;
+    color: var(--muted);
+    margin: 0 0 26px;
+    max-width: 520px;
+}
+
+.welcome-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    max-width: 720px;
+}
+
+.welcome-card {
+    display: block;
+    text-align: left;
+    padding: 14px 16px !important;
+    border: 1px solid var(--glass-bd) !important;
+    background: linear-gradient(
+        135deg,
+        rgba(255, 255, 255, .075),
+        rgba(255, 255, 255, .035)
+    ) !important;
+    backdrop-filter: blur(var(--blur)) saturate(170%);
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(170%);
+    border-radius: var(--r-md) !important;
+    cursor: pointer;
+    box-shadow: var(--gl-edge), var(--sh-sm) !important;
+    transition: background .18s ease,
+                border-color .18s ease,
+                box-shadow .18s ease,
+                transform .14s ease;
+    min-height: 0 !important;
+    height: auto !important;
+    width: 100% !important;
+}
+.welcome-card:hover {
+    background: linear-gradient(
+        135deg,
+        rgba(255, 255, 255, .11),
+        rgba(255, 255, 255, .055)
+    ) !important;
+    border-color: var(--accent-bd) !important;
+    transform: translateY(-2px);
+    box-shadow:
+        var(--gl-edge),
+        0 14px 34px rgba(0, 0, 0, .40) !important;
+}
+.welcome-card b {
+    display: block;
+    font-size: 13.5px;
+    font-weight: 600;
+    color: var(--tx);
+    margin-bottom: 4px;
+    letter-spacing: -.01em;
+}
+.welcome-card span {
+    display: block;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--muted);
+}
+
+/* ==========================================================
+   Chat Stream
+   ========================================================== */
+
+#chatbot {
+    /* Gradio 用它控制消息正文字号 */
+    --chatbot-text-size: 15px;
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
+    height: auto !important;
+    max-height: none !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+
+#chatbot > div,
+#chatbot .wrapper,
+#chatbot .bubble-wrap,
+#chatbot .wrap {
+    height: 100% !important;
+    max-height: 100% !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* Gradio 6 聊天消息的真实结构：
+   .bubble-wrap
+     └ .message-wrap
+        └ .message-row.bubble.{user,bot}-row     ← flex 行
+           └ .flex-wrap.role
+              └ .{user,bot}.message
+                 └ .message.panel-full-width
+                    └ #user / #bot
+                       └ .message-content > span.md.chatbot.prose
+           └ .message-buttons-{right,left}        ← 复制/重试按钮
+
+   Gradio 默认让 user 气泡靠右、bot 靠左并各自内缩，
+   这里把整条链路拉回「整宽正文流」，只靠前缀和左侧描边区分身份。 */
+#chatbot .bubble-wrap {
+    display: flex !important;
+    flex-direction: column !important;
+    width: 100% !important;
+}
+
+#chatbot .message-wrap {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    align-self: stretch !important;
+}
+
+#chatbot .message-row,
+#chatbot .message-row.bubble,
+#chatbot .message-row.user-row,
+#chatbot .message-row.bot-row {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    align-self: stretch !important;
+    justify-content: flex-start !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: transparent !important;
+}
+
+#chatbot .message-row > .flex-wrap,
+#chatbot .flex-wrap,
+#chatbot .role {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+}
+
+#chatbot .user.message,
+#chatbot .bot.message,
+#chatbot .message.panel-full-width,
+#chatbot .message,
+#chatbot #user,
+#chatbot #bot {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    text-align: left !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+}
+
+#chatbot .message-content {
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+}
+
+#chatbot .md,
+#chatbot .md.chatbot.prose,
+#chatbot .message .prose,
+#chatbot .message .md {
+    background: transparent !important;
+    border: none !important;
+    font-size: 15px !important;
+    line-height: 1.72 !important;
+    color: var(--tx) !important;
+    overflow-wrap: break-word;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* 消息容器统一宽度与左右留白 */
+#chatbot .bubble-wrap {
+    padding: 0 32px !important;
+    max-width: 796px !important;
+    margin: 0 auto !important;
+}
+
+/* chatbot 自带的处理中遮罩会盖出白色蒙层，关掉 */
+#chatbot [data-testid="status-tracker"],
+#chatbot .wrap.translucent {
+    display: none !important;
+}
+
+#chatbot .md p { margin: 0 0 12px !important; }
+#chatbot .md p:last-child { margin-bottom: 0 !important; }
+
+#chatbot .md h1,
+#chatbot .md h2,
+#chatbot .md h3 {
+    font-size: 16px !important;
+    font-weight: 650 !important;
+    letter-spacing: -.02em;
+    margin: 20px 0 10px !important;
+    color: var(--tx) !important;
+}
+
+#chatbot .md ul, #chatbot .md ol {
+    margin: 0 0 12px !important;
+    padding-left: 21px !important;
+}
+#chatbot .md li { margin: 4px 0 !important; }
+
+#chatbot .md a {
+    color: var(--accent-hi) !important;
+    text-decoration: none;
+    border-bottom: 1px solid rgba(23, 189, 147, .3);
+}
+#chatbot .md a:hover {
+    border-bottom-color: var(--accent-hi);
+}
+
+#chatbot .md strong { color: #fff; font-weight: 620; }
+
+#chatbot .md code {
+    font-family: var(--mono) !important;
+    font-size: 13px !important;
+    background: var(--glass-2) !important;
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-xs);
+    padding: 1.5px 6px !important;
+    color: #e2e2ec !important;
+}
+
+#chatbot .md pre {
+    background: var(--glass-deep) !important;
+    backdrop-filter: blur(var(--blur)) saturate(150%);
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(150%);
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-md) !important;
+    padding: 14px 16px !important;
+    margin: 12px 0 !important;
+    overflow-x: auto;
+    box-shadow: var(--gl-edge), var(--sh-md) !important;
+    /* 按内容宽度收缩：
+       满宽时它会和用户气泡、表格左右边缘对齐成一条线，
+       整段消息看上去像一整块拼接的板子。 */
+    width: fit-content;
+    max-width: 100%;
+}
+#chatbot .md pre code {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    font-size: 13px !important;
+    line-height: 1.62 !important;
+}
+
+#chatbot .md table {
+    border: 1px solid var(--hair) !important;
+    border-radius: var(--r-sm);
+    font-size: 13.5px !important;
+    margin: 12px 0 !important;
+    display: table;
+    width: 100%;
+}
+#chatbot .md th, #chatbot .md td {
+    border-color: var(--hair) !important;
+    padding: 8px 12px !important;
+}
+#chatbot .md th {
+    background: var(--panel-2) !important;
+    font-weight: 600;
+    color: var(--tx-2);
+}
+
+/* 引用块：只留一条细的强调边，不用整块底色 */
+#chatbot .md blockquote {
+    border: none !important;
+    border-left: 2px solid var(--accent) !important;
+    background: transparent !important;
+    border-radius: 0;
+    margin: 14px 0 !important;
+    padding: 2px 0 2px 14px !important;
+    color: var(--tx-2) !important;
+}
+
+#chatbot .md hr {
+    border: none !important;
+    border-top: 1px solid var(--hair) !important;
+    margin: 20px 0 !important;
+}
+
+/* 用户消息：› 前缀 + 左侧强调边 */
+#chatbot .message-row.user-row .md.chatbot.prose {
+    background: linear-gradient(
+        135deg,
+        rgba(255, 255, 255, .085),
+        rgba(255, 255, 255, .042)
+    );
+    backdrop-filter: blur(var(--blur)) saturate(170%);
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(170%);
+    border: 1px solid var(--glass-bd);
+    border-left: 2px solid var(--accent);
+    border-radius: var(--r-md);
+    padding: 12px 16px !important;
+    margin: 22px 0 4px !important;
+    box-shadow: var(--gl-edge), var(--sh-md);
+    font-weight: 450;
+    text-align: left !important;
+}
+
+#chatbot .message-row.user-row .md.chatbot.prose > p:first-child::before {
+    content: "›";
+    color: var(--accent-hi);
+    font-family: var(--mono);
+    font-weight: 700;
+    margin-right: 10px;
+}
+
+/* Agent 消息：纯正文，无气泡 */
+#chatbot .message-row.bot-row .md.chatbot.prose {
+    padding: 8px 0 22px !important;
+    margin: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+}
+
+/* 最后一条助手消息下方留出呼吸空间 */
+#chatbot .message-row.bot-row:last-child .md.chatbot.prose {
+    padding-bottom: 8px !important;
+}
+
+#chatbot .avatar-container { display: none !important; }
+
+/* 复制/重试小按钮：默认隐形，悬停才出现 */
+#chatbot .message-buttons {
+    display: flex !important;
+    justify-content: flex-start !important;
+    margin: 0 0 14px !important;
+    height: 22px;
+    opacity: 0;
+    transition: opacity .16s ease;
+}
+#chatbot .message-wrap:hover .message-buttons {
+    opacity: 1;
+}
+
+#chatbot .message-buttons button,
+#chatbot .message-buttons .icon-button {
+    min-height: 22px !important;
+    height: 22px !important;
+    width: auto !important;
+    padding: 0 6px !important;
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    box-shadow: none !important;
+    color: var(--faint) !important;
+}
+#chatbot .message-buttons button:hover {
+    color: var(--tx-2) !important;
+    border-color: var(--bd) !important;
+    background: var(--panel) !important;
+}
+
+/* chatbot 自带的浮动图标按钮（顶部工具条、消息复制、代码块复制）
+   它们的包装层默认带面板底色和描边，在对话流里会变成突兀的小方框。
+   这里全部改成透明幽灵按钮，悬停才显出形态。 */
+#chatbot .icon-button-wrapper,
+#chatbot .icon-button-wrapper.top-panel,
+#chatbot .icon-button-wrapper.hide-top-corner {
+    background: transparent !important;
+    border: none !important;
+    border-width: 0 !important;
+    box-shadow: none !important;
+}
+
+#chatbot .icon-button,
+#chatbot .icon-button-wrapper button {
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    box-shadow: none !important;
+    color: var(--faint) !important;
+    min-height: 22px !important;
+    height: 22px !important;
+    min-width: 0 !important;
+    padding: 0 5px !important;
+}
+
+#chatbot .icon-button:hover,
+#chatbot .icon-button-wrapper button:hover {
+    color: var(--tx) !important;
+    background: var(--panel-2) !important;
+    border-color: var(--bd) !important;
+}
+
+/* chatbot 顶部浮动工具条会贴在对话区右上角、
+   和内容与顶栏都打架，直接收掉。
+   整段对话的复制/导出走左侧「导出当前对话」。 */
+#chatbot .icon-button-wrapper.top-panel {
+    display: none !important;
+}
+
+/* Markdown 表格：hairline 网格，避免出现强调色描边 */
+#chatbot .md table {
+    border-collapse: collapse !important;
+    border: 1px solid var(--hair) !important;
+    border-radius: 0 !important;
+    overflow: hidden;
+    margin: 14px 0 !important;
+    display: table !important;
+    width: 100% !important;
+}
+#chatbot .md th,
+#chatbot .md td {
+    border: 1px solid var(--hair) !important;
+    border-color: var(--hair) !important;
+    padding: 8px 12px !important;
+}
+#chatbot .md thead th {
+    background: var(--glass-2) !important;
+    color: var(--tx-2) !important;
+    font-weight: 600 !important;
+    font-size: 12.5px !important;
+}
+#chatbot .md tbody tr:last-child td {
+    border-bottom: 1px solid var(--hair) !important;
+}
+
+/* 代码块（放在后面是因为要覆盖 Gradio 的默认外壳底色） */
+#chatbot .md pre,
+#chatbot .md pre > div {
+    background: var(--glass-deep) !important;
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-md) !important;
+}
+
+/* 思考过程 / 折叠面板 */
+#chatbot .thought-group,
+#chatbot .panel {
+    border-color: var(--hair) !important;
+    background: transparent !important;
+}
+
+/* ==========================================================
+   Approval Card
+   ========================================================== */
+
+#approval-card {
+    max-width: 760px;
+    width: 100%;
+    margin: 0 auto 10px;
+    border: 1px solid rgba(217, 161, 59, .40) !important;
+    background: linear-gradient(
+        180deg,
+        rgba(217, 161, 59, .16),
+        rgba(217, 161, 59, .06)
+    ) !important;
+    backdrop-filter: blur(var(--blur)) saturate(160%);
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(160%);
+    border-radius: var(--r-md) !important;
+    padding: 14px 18px !important;
+    font-size: 13.5px !important;
+    color: var(--tx) !important;
+    line-height: 1.65 !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .12),
+        var(--sh-md) !important;
+}
+#approval-card h3 {
+    margin: 0 0 9px !important;
+    font-size: 13px !important;
+    font-weight: 650 !important;
+    color: var(--warn) !important;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    letter-spacing: -.01em;
+}
+#approval-card h3::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--warn);
+    animation: pulse 1.2s ease-in-out infinite;
+    flex: 0 0 auto;
+}
+#approval-card code {
+    font-family: var(--mono) !important;
+    font-size: 12.5px !important;
+    background: rgba(0, 0, 0, .3) !important;
+    border: 1px solid var(--hair) !important;
+    border-radius: var(--r-xs) !important;
+    padding: 1px 6px !important;
+}
+#approval-card pre {
+    background: rgba(0, 0, 0, .32) !important;
+    border: 1px solid var(--hair) !important;
+    border-radius: var(--r-sm);
+    padding: 10px 13px !important;
+    margin: 9px 0 0 !important;
+    overflow-x: auto;
+}
+#approval-card pre code {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 !important;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+#approval-bar {
+    max-width: 796px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 0 32px !important;
+    gap: 8px !important;
+    align-items: center !important;
+    justify-content: flex-end !important;
+}
+
+/* 没有任何待审批项时整条隐藏。
+   Gradio 会把 visible=False 的组件从 DOM 移除，
+   所以用 :has() 反查即可，无需改事件输出。 */
+#center-panel:not(:has(#approval-card)) #approval-bar {
+    display: none !important;
+}
+
+#approval-bar button {
+    min-height: 34px !important;
+    height: 34px !important;
+    font-size: 12.5px !important;
+    padding: 0 18px !important;
+    flex: 0 0 auto !important;
+    width: auto !important;
+}
+
+/* ==========================================================
+   Composer
+   ========================================================== */
+
+#composer-shell {
+    max-width: 796px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 4px 32px 20px;
+}
+
+#composer {
+    background: linear-gradient(
+        180deg,
+        rgba(255, 255, 255, .088),
+        rgba(255, 255, 255, .042)
+    ) !important;
+    backdrop-filter: blur(var(--blur-lg)) saturate(180%);
+    -webkit-backdrop-filter: blur(var(--blur-lg)) saturate(180%);
+    border: 1px solid var(--glass-bd-2) !important;
+    border-radius: var(--r-xl) !important;
+    padding: 11px 13px 9px !important;
+    gap: 10px !important;
+    align-items: flex-end !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .16),
+        inset 0 -1px 0 rgba(0, 0, 0, .18),
+        0 18px 50px rgba(0, 0, 0, .44) !important;
+    transition: border-color .18s ease,
+                box-shadow .18s ease;
+}
+#composer:focus-within {
+    border-color: var(--accent-bd) !important;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, .18),
+        0 18px 50px rgba(0, 0, 0, .44),
+        0 0 0 4px var(--accent-soft) !important;
+}
+
+#message-composer {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+}
+#message-composer textarea {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    resize: none !important;
+    font-size: 15px !important;
+    line-height: 1.6 !important;
+    color: var(--tx) !important;
+    padding: 3px 4px !important;
+    font-family: var(--sans) !important;
+}
+#message-composer textarea:focus {
+    box-shadow: none !important;
+    border: none !important;
+}
+#message-composer textarea::placeholder { color: var(--faint) !important; }
+
+#send-task-button {
+    min-height: 38px !important;
+    min-width: 82px !important;
+    border-radius: var(--r-md) !important;
+    font-size: 13.5px !important;
+}
+
+#composer-hint-row {
+    max-width: 796px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 10px 34px 0 !important;
+    gap: 12px !important;
+    align-items: center !important;
+    justify-content: flex-end !important;
+    /* 必须不换行，否则状态框会把提示和停止挤到第二行 */
+    flex-wrap: nowrap !important;
+}
+
+#composer-hint {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    margin: 0 !important;
+    font-size: 11.5px !important;
+    color: var(--faint) !important;
+    text-align: right !important;
+    white-space: nowrap !important;
+}
+#composer-hint p { margin: 0 !important; font-size: 11.5px !important; }
+#composer-hint strong { color: var(--muted); font-weight: 600; }
+
+/* 停止按钮默认是安静的中性按钮，
+   只在悬停时变红——避免空闲状态下一根红色按钮一直抢视线。 */
+#stop-task-button {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-width: 0 !important;
+    min-height: 26px !important;
+    height: 26px !important;
+    padding: 0 12px !important;
+    font-size: 11.5px !important;
+    background: transparent !important;
+    border: 1px solid var(--hair) !important;
+    color: var(--muted) !important;
+}
+#stop-task-button:hover {
+    background: rgba(239, 106, 120, .10) !important;
+    border-color: rgba(239, 106, 120, .45) !important;
+    color: var(--err) !important;
+}
+/* 禁用态：明显压暗，悬停也不再变红，
+   否则"不可点"和"可点"在视觉上分不出来。 */
+#stop-task-button:disabled,
+#stop-task-button[disabled] {
+    opacity: .32 !important;
+    cursor: default !important;
+}
+#stop-task-button:disabled:hover,
+#stop-task-button[disabled]:hover {
+    background: transparent !important;
+    border-color: var(--hair) !important;
+    color: var(--muted) !important;
+}
+
+/* 底部状态行：占满左侧剩余空间，
+   把快捷键提示和停止按钮推到最右。 */
+#status-line-box {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    padding: 0 !important;
+    min-height: 26px !important;
+    /* flex-basis 必须为 0：
+       用 auto 时它会按内容撑开整行，把右侧两项顶到下一行。 */
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+}
+#status-line-box input,
+#status-line-box textarea {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    color: var(--muted) !important;
+    font-family: var(--mono) !important;
+    font-size: 11.8px !important;
+    padding: 0 !important;
+    min-height: 26px !important;
+    height: 26px !important;
+}
+#status-line-box input:focus,
+#status-line-box textarea:focus { box-shadow: none !important; }
+
+/* 快捷任务按钮。
+   用 #left-panel 前缀提高优先级，
+   否则会被上面的 #left-panel button 通用规则覆盖。 */
+#left-panel .quick-btn {
+    text-align: left !important;
+    justify-content: flex-start !important;
+    font-size: 12px !important;
+    min-height: 32px !important;
+    height: 32px !important;
+    padding: 0 11px !important;
+    background: transparent !important;
+    border: 1px solid var(--hair) !important;
+    color: var(--tx-2) !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    line-height: 1 !important;
+    box-shadow: none !important;
+}
+#left-panel .quick-btn:hover {
+    background: var(--panel-2) !important;
+    border-color: var(--accent-bd) !important;
+    color: var(--tx) !important;
+}
+
+/* 导出结果：只在导出后出现，做成一条紧凑的下载行 */
+#export-file {
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-sm) !important;
+    background: var(--glass) !important;
+    backdrop-filter: blur(var(--blur-sm)) saturate(160%);
+    -webkit-backdrop-filter: blur(var(--blur-sm)) saturate(160%);
+    box-shadow: var(--gl-edge) !important;
+    padding: 0 !important;
+    overflow: hidden;
+}
+#export-file label,
+#export-file .block-label {
+    display: none !important;
+}
+#export-file .file-preview,
+#export-file a,
+#export-file .file-name {
+    font-family: var(--mono) !important;
+    font-size: 11.5px !important;
+    color: var(--accent-hi) !important;
+}
+#export-file button {
+    min-height: 30px !important;
+    height: 30px !important;
+    font-size: 11.5px !important;
+    border: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+#export-status {
+    margin: 0 !important;
+}
+#export-status p {
+    margin: 2px 0 0 !important;
+    font-size: 11px !important;
+    color: var(--faint) !important;
+}
+
+#workspace-path { margin: 0 !important; }
+#workspace-path p,
+#workspace-path { font-size: 12px !important; }
+#workspace-path code {
+    font-family: var(--mono) !important;
+    font-size: 11.2px !important;
+    background: var(--panel) !important;
+    border: 1px solid var(--hair) !important;
+    border-radius: var(--r-xs) !important;
+    padding: 5px 9px !important;
+    color: var(--muted) !important;
+    display: block;
+    word-break: break-all;
+}
+
+/* ==========================================================
+   Right Panel
+   ========================================================== */
+
+/* Gradio 6 的 Tab 真实结构：
+   .tabs > .tab-wrapper > .tab-container > button(.selected)
+   内容在 .tabs > .tabitem */
+#right-panel .tabs,
+#settings-shell .tabs {
+    border: none !important;
+    background: transparent !important;
+    gap: 12px !important;
+}
+
+#right-panel .tab-wrapper,
+#settings-shell .tab-wrapper {
+    position: relative;
+}
+
+#right-panel .tab-container:not(.visually-hidden),
+#settings-shell .tab-container:not(.visually-hidden) {
+    display: flex !important;
+    align-items: center !important;
+    gap: 2px !important;
+    background: var(--glass) !important;
+    backdrop-filter: blur(var(--blur)) saturate(165%);
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(165%);
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-md) !important;
+    padding: 3px !important;
+    width: 100% !important;
+    box-sizing: border-box;
+    box-shadow: var(--gl-edge) !important;
+}
+
+#right-panel .tab-container:not(.visually-hidden) button,
+#settings-shell .tab-container:not(.visually-hidden) button {
+    flex: 1 1 auto !important;
+    border: none !important;
+    background: transparent !important;
+    color: var(--muted) !important;
+    border-radius: var(--r-sm) !important;
+    font-size: 12.5px !important;
+    font-weight: 550 !important;
+    padding: 0 8px !important;
+    height: 30px !important;
+    min-height: 30px !important;
+    box-shadow: none !important;
+    white-space: nowrap !important;
+    transition: background .14s ease, color .14s ease;
+}
+
+#right-panel .tab-container:not(.visually-hidden) button:hover,
+#settings-shell .tab-container:not(.visually-hidden) button:hover {
+    background: var(--panel-2) !important;
+    color: var(--tx) !important;
+}
+
+#right-panel .tab-container:not(.visually-hidden) button.selected,
+#settings-shell .tab-container:not(.visually-hidden) button.selected {
+    background: var(--glass-3) !important;
+    color: var(--tx) !important;
+    box-shadow: var(--gl-edge), var(--sh-sm) !important;
+}
+
+#right-panel .tabitem,
+#settings-shell .tabitem {
+    border: none !important;
+    padding: 0 !important;
+    background: transparent !important;
+    flex-direction: column !important;
+    gap: 12px !important;
+    min-height: 0 !important;
+}
+
+#trace-hint { margin: 0 0 12px !important; }
+#trace-hint p {
+    margin: 0 !important;
+    font-size: 12px !important;
+    color: var(--muted) !important;
+    line-height: 1.65 !important;
+}
+
+#trace-table {
+    font-size: 12px !important;
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-md) !important;
+    overflow: hidden;
+    backdrop-filter: blur(var(--blur)) saturate(160%);
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(160%);
+    box-shadow: var(--gl-edge), var(--sh-sm) !important;
+}
+#trace-table table { font-size: 12px !important; }
+#trace-table thead th {
+    background: var(--glass-2) !important;
+    color: var(--muted) !important;
+    font-weight: 600 !important;
+    font-size: 10.5px !important;
+    text-transform: uppercase;
+    letter-spacing: .07em;
+    border-bottom: 1px solid var(--hair) !important;
+}
+#trace-table tbody td {
+    border-bottom: 1px solid var(--hair) !important;
+    font-family: var(--mono);
+    font-size: 11.5px !important;
+    line-height: 1.55 !important;
+    padding: 8px 10px !important;
+    color: var(--tx-2) !important;
+    vertical-align: top;
+}
+#trace-table tbody tr:hover td { background: var(--panel) !important; }
+
+#tools-box, #sources-box, #context-box {
+    font-size: 13px !important;
+    line-height: 1.7 !important;
+    color: var(--tx-2) !important;
+}
+#tools-box code, #sources-box code, #context-box code {
+    font-family: var(--mono) !important;
+    font-size: 12px !important;
+    background: var(--panel-2) !important;
+    border: 1px solid var(--hair) !important;
+    border-radius: var(--r-xs);
+    padding: 1px 6px !important;
+}
+#tools-box h3, #sources-box h3, #context-box h3 {
+    font-size: 13.5px !important;
+    margin: 14px 0 7px !important;
+    color: var(--tx) !important;
+    letter-spacing: -.015em;
+}
+#tools-box ul, #sources-box ul, #context-box ul {
+    padding-left: 19px !important;
+    margin: 5px 0 !important;
+}
+
+/* ==========================================================
+   Settings
+   ========================================================== */
+
+/* Settings 的 Tab 样式与右栏共用上面的规则，
+   这里只补它自己的间距和分组卡片。 */
+#settings-shell {
+    padding: 24px 28px 40px !important;
+    gap: 18px !important;
+    overflow-y: auto !important;
+}
+
+#settings-shell .gr-accordion,
+#settings-shell .form {
+    border: 1px solid var(--glass-bd) !important;
+    border-radius: var(--r-md) !important;
+    background: var(--glass) !important;
+    backdrop-filter: blur(var(--blur)) saturate(165%);
+    -webkit-backdrop-filter: blur(var(--blur)) saturate(165%);
+    box-shadow: var(--gl-edge), var(--sh-sm) !important;
+    padding: 14px 16px !important;
+}
+
+#settings-shell .gr-accordion .label-wrap {
+    font-weight: 600 !important;
+}
+
+/* ==========================================================
+   Responsive
+   ========================================================== */
+
+@media (max-width: 1400px) {
+    #right-panel {
+        width: 344px !important;
+        flex: 0 0 344px !important;
+        min-width: 344px !important;
+        max-width: 344px !important;
+    }
+}
+
+@media (max-width: 1180px) {
+    #right-panel {
+        width: 300px !important;
+        flex: 0 0 300px !important;
+        min-width: 300px !important;
+        max-width: 300px !important;
+    }
+    #left-panel {
+        width: 232px !important;
+        flex: 0 0 232px !important;
+        min-width: 232px !important;
+        max-width: 232px !important;
+    }
+}
+
+@media (max-width: 960px) {
+    #left-panel { display: none !important; }
+    #right-panel { display: none !important; }
+    #chatbot .md,
+    #composer-shell, #composer-hint-row,
+    #approval-bar, #approval-card {
+        padding-left: 20px;
+        padding-right: 20px;
+    }
+    #welcome { padding: 0 20px 100px; }
+    .welcome-grid { grid-template-columns: 1fr; }
+}

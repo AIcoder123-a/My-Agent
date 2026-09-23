@@ -13,11 +13,24 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_functions(filename, names, namespace):
-    tree = ast.parse((ROOT / filename).read_text(encoding="utf-8"))
-    nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names]
-    assert len(nodes) == len(names)
-    exec(compile(ast.Module(body=nodes, type_ignores=[]), filename, "exec"), namespace)
-    return namespace
+    """从给定文件里挑出需要的函数并注入 namespace。
+
+    filename 可以是候选列表：界面拆分后这些函数搬到了 gui_handlers.py，
+    按顺序找，避免以后再挪位置时测试全崩。
+    """
+    candidates = [filename] if isinstance(filename, str) else list(filename)
+    for name in candidates:
+        path = ROOT / name
+        if not path.exists():
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        nodes = [node for node in tree.body
+                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and node.name in names]
+        if len(nodes) == len(names):
+            exec(compile(ast.Module(body=nodes, type_ignores=[]), name, "exec"), namespace)
+            return namespace
+    raise AssertionError(f"{sorted(names)} not found in {candidates}")
 
 
 class ChatRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -31,8 +44,9 @@ class ChatRegressionTests(unittest.IsolatedAsyncioTestCase):
                        empty_sources_text=lambda: "", conversation_dropdown_state=lambda: "original",
                        tool_text=lambda value: value or "tool", short_text=str, json_text=str,
                        render_sources_markdown=lambda value: "", perf_counter=Mock(side_effect=range(1000)))
-        load_functions("gui.py", {"clone_history", "normalize_agent_text", "progress_message", "add_trace",
-                                  "render_service_stream", "send_task", "switch_conversation_ui"}, self.ns)
+        load_functions(["gui_handlers.py", "gui.py"],
+                       {"clone_history", "normalize_agent_text", "progress_message", "add_trace",
+                        "render_service_stream", "send_task", "switch_conversation_ui"}, self.ns)
         load_functions("memory.py", {"_content_to_text", "chat_messages_from_items"}, self.ns)
 
     async def render(self, events, history=None):
