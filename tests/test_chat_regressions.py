@@ -37,7 +37,8 @@ class ChatRegressionTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.service = SimpleNamespace(is_busy=Mock(return_value=False), get_session_id=lambda: "test",
                                        switch_conversation=AsyncMock(side_effect=RuntimeError("busy")))
-        self.ns = dict(Any=Any, service=self.service, SEND_OUTPUTS=range(14), SESSION_SWITCH_OUTPUTS=range(13),
+        self.ns = dict(Any=Any, service=self.service,
+                       SEND_OUTPUT_COUNT=14, SESSION_SWITCH_OUTPUT_COUNT=13,
                        gr=SimpleNamespace(skip=lambda: {"__type__": "update"}, Warning=Mock()),
                        approval_view=lambda *args: {}, approval_button_state=lambda value: value,
                        button_state=lambda value: value, current_task_text=lambda: "task",
@@ -46,7 +47,8 @@ class ChatRegressionTests(unittest.IsolatedAsyncioTestCase):
                        render_sources_markdown=lambda value: "", perf_counter=Mock(side_effect=range(1000)))
         load_functions(["gui_handlers.py", "gui.py"],
                        {"clone_history", "normalize_agent_text", "progress_message", "add_trace",
-                        "render_service_stream", "send_task", "switch_conversation_ui"}, self.ns)
+                        "render_service_stream", "send_task", "switch_conversation_ui",
+                        "skip_tuple"}, self.ns)
         load_functions("memory.py", {"_content_to_text", "chat_messages_from_items"}, self.ns)
 
     async def render(self, events, history=None):

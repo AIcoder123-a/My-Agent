@@ -23,6 +23,10 @@ from app_runtime import (
 
 from gui_assets import COMPOSER_MENU_HTML, CSS, KEYBOARD_JS
 from gui_handlers import *  # noqa: F401,F403  事件处理函数
+from gui_handlers import (  # noqa: F401  输出组长度，用于断言布局与 handler 一致
+    SEND_OUTPUT_COUNT,
+    SESSION_SWITCH_OUTPUT_COUNT,
+)
 
 # 下划线开头不会被 import * 带过来，但布局初始化时要用到。
 from gui_handlers import _settings_snapshot  # noqa: F401
@@ -156,40 +160,52 @@ with gr.Blocks(
                     )
                 )
 
-            with gr.Accordion(
-                "重命名 / 删除会话",
-                open=False,
-            ):
+            # ------------------------------------------------
+            # 会话管理
+            #
+            # 原先重命名和删除一起塞在「重命名 / 删除会话」
+            # 折叠面板里，默认收起，用户根本看不见，
+            # 要重命名一个会话得先在侧栏里翻找。
+            # 这两个是日常操作，直接平铺，用分隔标题隔开。
+            # ------------------------------------------------
 
-                conversation_title = (
-                    gr.Textbox(
-                        value=(
-                            current_conversation_title()
-                        ),
-                        label="会话名称",
-                        placeholder="输入会话名称……",
-                    )
-                )
+            gr.HTML(
+                '<div class="section-label rule">'
+                "会话管理"
+                "</div>"
+            )
 
-                rename_conversation_button = (
-                    gr.Button(
-                        "重命名"
-                    )
+            conversation_title = (
+                gr.Textbox(
+                    value=(
+                        current_conversation_title()
+                    ),
+                    label=None,
+                    show_label=False,
+                    placeholder="当前会话名称……",
+                    elem_id="conversation-title-input",
                 )
+            )
 
-                delete_confirm = (
-                    gr.Checkbox(
-                        value=False,
-                        label="确认删除当前对话",
-                    )
+            rename_conversation_button = (
+                gr.Button(
+                    "重命名当前会话"
                 )
+            )
 
-                delete_conversation_button = (
-                    gr.Button(
-                        "删除当前对话",
-                        variant="stop",
-                    )
+            delete_confirm = (
+                gr.Checkbox(
+                    value=False,
+                    label="确认删除当前对话",
                 )
+            )
+
+            delete_conversation_button = (
+                gr.Button(
+                    "删除当前对话",
+                    variant="stop",
+                )
+            )
 
             with gr.Accordion("工具与运行配置", open=False):
                 gr.HTML(
@@ -2267,6 +2283,28 @@ with demo:
             ],
             outputs=SESSION_SWITCH_OUTPUTS,
         )
+    )
+
+    # 输出组长度与 handlers 里的常量必须一致。
+    # 两边一旦漂移，skip 元组长度就对不上，Gradio 只在
+    # 「任务忙 / 切换失败」这些分支才报出来，很难发现。
+    assert (
+        len(SEND_OUTPUTS)
+        == SEND_OUTPUT_COUNT
+    ), (
+        f"SEND_OUTPUTS 有 {len(SEND_OUTPUTS)} 项，"
+        f"但 gui_handlers.SEND_OUTPUT_COUNT "
+        f"是 {SEND_OUTPUT_COUNT}。"
+    )
+
+    assert (
+        len(SESSION_SWITCH_OUTPUTS)
+        == SESSION_SWITCH_OUTPUT_COUNT
+    ), (
+        f"SESSION_SWITCH_OUTPUTS 有 "
+        f"{len(SESSION_SWITCH_OUTPUTS)} 项，"
+        f"但 gui_handlers.SESSION_SWITCH_OUTPUT_COUNT "
+        f"是 {SESSION_SWITCH_OUTPUT_COUNT}。"
     )
 
     switch_event.then(

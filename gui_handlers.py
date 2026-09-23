@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
@@ -71,6 +72,29 @@ from app_runtime import *  # noqa: F401,F403  service / 路径常量 / 名称映
 from app_runtime import service  # noqa: F401  显式声明，便于静态检查
 
 import workspace_snapshots
+
+# ============================================================
+# 事件输出组的「长度」
+#
+# 原先 send_task / switch_conversation_ui 直接引用
+# SEND_OUTPUTS、SESSION_SWITCH_OUTPUTS 这两个组件列表来构造
+# "其余输出全部 skip" 的元组。拆分模块后这两个列表留在 gui.py
+# 的 Blocks 里，handlers 引用它们会直接 NameError —— 而且只在
+# 「任务忙 / 切换失败」这些分支才会走到，平时看不出来。
+#
+# handlers 真正需要的只是长度，不是组件本身。
+# 改成数量常量，gui.py 构建完布局后断言长度一致。
+# ============================================================
+
+SEND_OUTPUT_COUNT = 14
+
+SESSION_SWITCH_OUTPUT_COUNT = 13
+
+
+def skip_tuple(count):
+    """构造 count 个 gr.skip()，表示"这些输出都不更新"。"""
+    return tuple(gr.skip() for _ in range(count))
+
 
 # ============================================================
 # 通用辅助
@@ -377,15 +401,67 @@ def current_task_text() -> str:
         task_id
         or "—"
     )
+def _session_time_label(raw):
+    """把 '2026-09-23 17:30:12' 压成 '09-23 17:30:12'。
+
+    保留到秒：同一分钟内新建几个会话是常有的事，
+    只到分钟的话它们在列表里长得一模一样。
+    """
+
+    text = (raw or "").strip()
+
+    if not text:
+        return ""
+
+    # 兼容带 T 的 ISO 写法
+    text = text.replace("T", " ")
+
+    date_part, _, time_part = (
+        text.partition(" ")
+    )
+
+    date_bits = date_part.split("-")
+
+    if len(date_bits) == 3:
+        date_part = "-".join(
+            date_bits[1:]
+        )
+
+    return (
+        f"{date_part} "
+        f"{time_part[:8]}"
+    ).strip()
+
+
+def _short_session_id(session_id):
+    """从 'v2_4900050b-601a-...' 里取出可辨认的一小段。"""
+
+    text = (session_id or "").strip()
+
+    if not text:
+        return ""
+
+    # 形如 v2_<uuid>，去掉前缀只留 uuid 本体
+    tail = text.split("_")[-1]
+
+    tail = tail.replace("-", "")
+
+    return tail[:6]
+
+
 def conversation_choices():
     """
     生成对话历史 Dropdown 选项。
 
     显示：
-        ● 会话名称 · 12 项
+        ● 会话名称 · 09-23 17:30:12 · 12 条
 
     实际传给回调：
         session_id
+
+    带上时间和条数是为了让选项可辨认。
+    原先一律是「标题 · N 项」，新建几个会话之后
+    列表里全是「新对话 · 0 项」，根本分不清谁是谁。
     """
 
     sessions = (
@@ -406,8 +482,11 @@ def conversation_choices():
         )
 
         title = (
-            item.get("title")
-            or "新对话"
+            (
+                item.get("title")
+                or ""
+            ).strip()
+            or "未命名对话"
         )
 
         count = (
@@ -421,12 +500,24 @@ def conversation_choices():
         prefix = (
             "● "
             if session_id == current_id
-            else ""
+            else "  "
+        )
+
+        when = _session_time_label(
+            item.get("updated_at")
+            or item.get("created_at")
+        )
+
+        amount = (
+            f"{count} 条"
+            if count
+            else "空"
         )
 
         label = (
             f"{prefix}{title}"
-            f" · {count} 项"
+            f" · {when}"
+            f" · {amount}"
         )
 
         choices.append(
@@ -435,6 +526,38 @@ def conversation_choices():
                 session_id,
             )
         )
+
+    # ====================================================
+    # 兜底：仍然撞车就补上会话 ID 短前缀
+    #
+    # 同一秒内新建多个会话时，「标题 + 时间 + 条数」
+    # 三个字段可能完全一样，列表里依旧分不清谁是谁。
+    # ====================================================
+
+    repeats = Counter(
+        label
+        for label, _
+        in choices
+    )
+
+    if any(
+        count > 1
+        for count in repeats.values()
+    ):
+
+        choices = [
+            (
+                (
+                    f"{label} · "
+                    f"#{_short_session_id(session_id)}"
+                )
+                if repeats[label] > 1
+                else label,
+                session_id,
+            )
+            for label, session_id
+            in choices
+        ]
 
     return choices
 
@@ -460,10 +583,10 @@ def current_conversation_title(
         ):
             return (
                 item.get("title")
-                or "新对话"
+                or "未命名对话"
             )
 
-    return "新对话"
+    return "未命名对话"
 
 def conversation_dropdown_state(
     selected=None,
@@ -2157,7 +2280,7 @@ async def send_task(
 
     if service.is_busy():
         gr.Warning("当前任务尚未结束，请先停止任务或处理待审批操作。")
-        yield tuple(gr.skip() for _ in SEND_OUTPUTS)
+        yield skip_tuple(SEND_OUTPUT_COUNT)
         return
 
     # --------------------------------------------------------
@@ -2417,7 +2540,7 @@ def create_session():
         ),
 
         # conversation_title
-        "新对话",
+        "未命名对话",
 
         # delete_confirm
         False,
@@ -2461,7 +2584,7 @@ async def switch_conversation_ui(
 
     if service.is_busy():
         gr.Warning("当前任务尚未结束，暂时不能切换会话。请先停止任务或处理审批。")
-        updates = [gr.skip() for _ in SESSION_SWITCH_OUTPUTS]
+        updates = list(skip_tuple(SESSION_SWITCH_OUTPUT_COUNT))
         updates[8] = conversation_dropdown_state()
         return tuple(updates)
 
@@ -2534,7 +2657,7 @@ async def switch_conversation_ui(
 
     except Exception as error:
         gr.Warning(f"切换会话失败：{error}")
-        updates = [gr.skip() for _ in SESSION_SWITCH_OUTPUTS]
+        updates = list(skip_tuple(SESSION_SWITCH_OUTPUT_COUNT))
         updates[3] = f"切换会话失败：{error}"
         updates[8] = conversation_dropdown_state()
         return tuple(updates)

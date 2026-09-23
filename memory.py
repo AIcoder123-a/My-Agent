@@ -427,7 +427,13 @@ def list_sessions(
                 {APP_SESSION_TABLE} c
 
             ORDER BY
-                c.updated_at DESC
+                c.updated_at DESC,
+
+                -- updated_at 只精确到秒，同一秒内创建的多个会话
+                -- 排序结果不稳定，列表会在每次刷新后跳来跳去。
+                -- 补两级排序让它变成确定的。
+                c.created_at DESC,
+                c.session_id DESC
 
             LIMIT ?
             """,
