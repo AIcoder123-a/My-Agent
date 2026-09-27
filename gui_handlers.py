@@ -68,10 +68,16 @@ from mcp_manager import (
 
 import usage_stats
 
+from token_budget import CONTEXT_ITEM_LIMIT
+
 from app_runtime import *  # noqa: F401,F403  service / 路径常量 / 名称映射
 from app_runtime import service  # noqa: F401  显式声明，便于静态检查
 
 import workspace_snapshots
+
+# 聊天区展示的历史条数上限 = memory 读取历史用的 SessionSettings.limit。
+# 两者必须同源：提示"仅展示最近 N 条"时，N 必须和实际截断数一致。
+CONTEXT_DISPLAY_LIMIT = CONTEXT_ITEM_LIMIT
 
 # ============================================================
 # 事件输出组的「长度」
@@ -647,6 +653,110 @@ def approval_button_state(
     return gr.Button(
         interactive=interactive,
         visible=interactive,
+    )
+
+def approval_card_markdown(
+    tool_display: str,
+    arguments: str,
+    remaining: int = 0,
+) -> str:
+    """
+    审批卡的 Markdown，实时流与刷新恢复共用这一份。
+
+    批准前用户真正要审的是那条命令本身，
+    所以参数里带 command 字段时把它单独提出来
+    高亮成代码块（run_shell 与同类 MCP 工具都受益），
+    其余工具维持 JSON 原样；有排队操作时说明
+    批完还有，以及怎么一次性放弃。
+    """
+
+    body = (
+        "**参数：**\n\n"
+        f"```text\n{arguments}\n```"
+    )
+
+    parsed = None
+
+    try:
+
+        parsed = json.loads(
+            arguments or ""
+        )
+
+    except ValueError:
+
+        pass
+
+    command = ""
+
+    if isinstance(
+        parsed,
+        dict,
+    ):
+
+        value = parsed.get(
+            "command"
+        )
+
+        if isinstance(
+            value,
+            str,
+        ) and value.strip():
+
+            command = value.strip()
+
+    if command:
+
+        meta = []
+
+        cwd = parsed.get(
+            "cwd"
+        )
+
+        timeout = parsed.get(
+            "timeout_seconds"
+        )
+
+        if isinstance(
+            cwd,
+            str,
+        ) and cwd.strip():
+
+            meta.append(
+                f"工作目录 `{cwd.strip()}`"
+            )
+
+        if isinstance(
+            timeout,
+            (int, float),
+        ) and timeout:
+
+            meta.append(
+                f"超时 {int(timeout)} 秒"
+            )
+
+        body = (
+            "**命令：**\n\n"
+            f"```bash\n{command}\n```\n\n"
+            + " · ".join(meta)
+        )
+
+    queue_note = ""
+
+    if remaining > 1:
+
+        queue_note = (
+            "\n\n还有 **"
+            f"{int(remaining) - 1}"
+            "** 个操作在排队等待审批，"
+            "可逐个批准，或点「停止」一并放弃。"
+        )
+
+    return (
+        "### 需要人工批准\n\n"
+        f"**操作：** {tool_display}\n\n"
+        f"{body}"
+        f"{queue_note}"
     )
 
 def dropdown_state(
@@ -1974,24 +2084,14 @@ async def render_service_stream(
                 or 0
             )
 
-            remaining_text = (
-                f"\n\n还有 **{max(0, int(remaining) - 1)}** 个操作"
-                "在排队等待审批。"
-                if int(
-                    remaining
-                )
-                > 1
-                else ""
-            )
-
             approval_text = approval_view(
-                "### 需要人工批准\n\n"
-                f"**操作：** {tool_name}\n\n"
-                "**参数：**\n\n"
-                "```text\n"
-                f"{arguments}\n"
-                "```"
-                f"{remaining_text}",
+                approval_card_markdown(
+                    tool_name,
+                    arguments,
+                    int(
+                        remaining
+                    ),
+                ),
                 True,
             )
 
@@ -2581,9 +2681,11 @@ async def restore_view_ui():
         if pending:
             item = pending[0]
             approval = approval_view(
-                "### 需要人工批准\n\n"
-                f"**操作：** {tool_text(item.name)}\n\n"
-                f"```text\n{json_text(item.arguments)}\n```",
+                approval_card_markdown(
+                    tool_text(item.name),
+                    json_text(item.arguments),
+                    len(pending),
+                ),
                 True,
             )
         status = (
@@ -2602,7 +2704,7 @@ async def restore_view_ui():
             button_state(not (running or pending)), button_state(not (running or pending)),
             button_state(bool(pending) or (running and not pending)), status,
             runtime_status_markdown(),
-            task_plan_markdown(), context_badge_text(),
+            task_plan_markdown(),
         )
         if not running:
             return
@@ -2918,33 +3020,6 @@ def get_context_snapshot() -> dict:
 
     return {}
 
-def context_badge_text() -> str:
-
-    status = get_context_snapshot()
-
-    if status.get("error"):
-        return "**上下文 · 异常**"
-
-    total_items = (
-        status.get("total_items")
-        or 0
-    )
-
-    has_summary = bool(
-        status.get("has_summary")
-    )
-
-    label = (
-        "摘要已启用"
-        if has_summary
-        else "原始上下文"
-    )
-
-    return (
-        f"**上下文 · {label} · "
-        f"{total_items} 项**"
-    )
-
 def context_markdown() -> str:
 
     status = get_context_snapshot()
@@ -3064,6 +3139,20 @@ def context_markdown() -> str:
         ]
     )
 
+    # 界面历史有读取上限（memory 的 SessionSettings.limit），
+    # 超出部分不会出现在聊天区 —— 历史并未丢失，只是不展示。
+    # 不提示的话用户会以为旧对话被删了。
+    if total_items > CONTEXT_DISPLAY_LIMIT:
+
+        lines.append(
+            (
+                f"> 界面仅展示最近 "
+                f"**{CONTEXT_DISPLAY_LIMIT}** 条消息，"
+                "更早的历史仍完整保留在会话中，"
+                "可随时切换会话查看或导出。"
+            )
+        )
+
     # --------------------------------------------------
     # 用量
     #
@@ -3111,10 +3200,9 @@ def context_markdown() -> str:
 
 def refresh_context_ui():
 
-    return (
-        context_badge_text(),
-        context_markdown(),
-    )
+    # 输出只剩 context_box 单组件：
+    # 单输出时 Gradio 要求直接返回值，不能包元组。
+    return context_markdown()
 
 # ============================================================
 # 设置中心
@@ -4569,6 +4657,41 @@ def runtime_status_markdown() -> str:
         state_cls = "ok"
         dot_cls = "ok"
 
+    # 上下文占用并入顶栏徽章。
+    # 原 context_badge 组件长期被 CSS 隐藏却仍在每次刷新，
+    # 现在信息直接以 chip 形式随运行状态一起更新。
+    context_text = "上下文"
+
+    try:
+
+        snapshot = (
+            get_context_snapshot()
+        )
+
+        total_items = (
+            snapshot.get(
+                "total_items"
+            )
+            or 0
+        )
+
+        summary_label = (
+            " · 已摘要"
+            if snapshot.get(
+                "has_summary"
+            )
+            else ""
+        )
+
+        context_text = (
+            f"上下文 · {total_items} 项"
+            f"{summary_label}"
+        )
+
+    except Exception:
+
+        pass
+
     return (
         f'<span class="chip {state_cls}">'
         f'<span class="dot {dot_cls}"></span>'
@@ -4576,6 +4699,7 @@ def runtime_status_markdown() -> str:
         f'<span class="chip">{html.escape(model)}</span>'
         f'<span class="chip mcp">'
         f"MCP {mcp_text}</span>"
+        f'<span class="chip">{html.escape(context_text)}</span>'
     )
 
 # ============================================================

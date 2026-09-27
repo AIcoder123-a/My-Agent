@@ -77,15 +77,6 @@ with gr.Blocks(
                 )
             )
 
-            context_badge = (
-                gr.Markdown(
-                    value=(
-                        context_badge_text()
-                    ),
-                    elem_id="context-badge",
-                )
-            )
-
     with gr.Row(
         elem_id="app-shell",
     ):
@@ -1559,7 +1550,6 @@ with demo:
         action_button.elem_classes = [*(action_button.elem_classes or []), "action-feedback"]
 
     CONTEXT_OUTPUTS = [
-        context_badge,
         context_box,
     ]
 
@@ -1699,7 +1689,7 @@ with demo:
     demo.load(fn=restore_view_ui, outputs=[
         chatbot, session_box, task_box, conversation_selector, conversation_title,
         approval_box, approve_button, reject_button, send_button, new_session_button,
-        stop_button, status_box, runtime_status, plan_box, context_badge,
+        stop_button, status_box, runtime_status, plan_box,
     ])
 
     # 页面打开后后台预热 MCP 连接池。

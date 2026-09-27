@@ -595,13 +595,6 @@ label[data-testid="block-label"] {
     50% { opacity: .4; transform: scale(.8); }
 }
 
-#context-badge { margin: 0 !important; }
-#context-badge p {
-    margin: 0 !important;
-    font-size: 11px !important;
-    color: var(--faint) !important;
-}
-
 /* ==========================================================
    Shell / 三栏
    ========================================================== */
