@@ -594,11 +594,6 @@ def _remove_orphan_tool_outputs(
         result.append(
             item
         )
-        continue
-
-        result.append(
-            item
-        )
 
     return result
 
@@ -1289,6 +1284,46 @@ def build_session_input_callback(
                 raw_history
             )
         )
+
+        # ------------------------------------------------
+        # 读路径体积硬闸。
+        #
+        # 上面的条目数与游标只决定「哪些应该保留」，
+        # 但摘要可能尚未生成或持续失败（压缩触发在写路径，
+        # 失败后不会重试到下一轮）——此时尾部原始历史
+        # 条目数再合法，体积也可能已经爆窗。
+        # 这里从末尾向前按体积预算兜底截断；
+        # 切点若落在 Tool 配对中间，先推进到安全边界再清理。
+        # ------------------------------------------------
+        budget_boundary = token_cutoff(
+            raw_history,
+            RECENT_CONTEXT_TOKENS,
+        )
+
+        if budget_boundary > 0:
+
+            safe_budget_start = (
+                _find_safe_boundary(
+                    raw_history,
+                    budget_boundary,
+                )
+            )
+
+            raw_history = raw_history[
+                safe_budget_start:
+            ]
+
+            raw_history = (
+                _remove_orphan_tool_outputs(
+                    raw_history
+                )
+            )
+
+            raw_history = (
+                _remove_unanswered_tool_calls(
+                    raw_history
+                )
+            )
 
         result = []
 

@@ -1436,7 +1436,11 @@ async def render_service_stream(
 
     last_ui_flush = 0.0
 
-    flush_interval = 0.04
+    # 流式刷新间隔。每个 flush 都会把整个聊天历史作为完整
+    # 消息列表重新传输并全量重渲 Markdown，0.04s（25fps）
+    # 在长对话下会造成明显的卡顿与闪烁；0.12s 对肉眼流畅度
+    # 几乎无感，但把重渲频率降到原来的三分之一。
+    flush_interval = 0.12
 
     async for event in stream:
 

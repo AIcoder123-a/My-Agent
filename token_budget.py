@@ -25,21 +25,43 @@
 不做真实分词（那需要 tiktoken 之类的依赖，
 且各家模型的分词还不一样）。
 
-中英混排场景取「3 字符 ≈ 1 token」：
-    英文约 4 字符/token，
-    中文约 1~1.5 字符/token。
-3 是偏保守的折中 —— 宁可估多、提前压缩，
-也不要估少、把窗口撑爆。
+按字符类别分别折算，两个方向都偏保守（宁可估多）：
+
+    英文/ASCII 约 4 字符/token，按 3.5 折算；
+    中文约 1.3~1.7 字符/token（DeepSeek 偏上限，
+    OpenAI 偏下限），按 1.2 折算。
+
+旧实现统一按「3 字符 ≈ 1 token」，自称“宁可估多”，
+但对中文恰好是估少 —— 一段中文的真实 token 数
+最高可达旧估算的 2.5 倍。对一个固定用中文回答的
+Agent，估少意味着压缩永远来得太晚、窗口被撑爆。
 """
 import json
+import re
 
 
 # ============================================================
 # 估算
 # ============================================================
 
-# 中英混排的保守折算：多少个字符算 1 个 token
-CHARS_PER_TOKEN = 3
+# 中文类字符（汉字/假名/谚文/全角标点）的折算：
+# 多少个字符算 1 个 token。取 1.2 —— 比各家真实分词
+# 都更「费 token」，方向是提前压缩而不是事后爆窗。
+CJK_CHARS_PER_TOKEN = 1.2
+
+# 英文/数字/符号的折算。
+OTHER_CHARS_PER_TOKEN = 3.5
+
+# CJK 统一表意文字、部首、假名、谚文、全角形式，
+# 以及扩展 A-F（ astral 平面）。
+_CJK_RE = re.compile(
+    "["
+    "\u2e80-\u9fff"
+    "\uf900-\ufaff"
+    "\uff00-\uffef"
+    "\U00020000-\U0002fa1f"
+    "]"
+)
 
 
 def estimate_tokens(
@@ -59,13 +81,26 @@ def estimate_tokens(
     if not raw:
         return 0
 
+    cjk = sum(
+        1
+        for _ in _CJK_RE.finditer(
+            raw
+        )
+    )
+
+    other = len(
+        raw
+    ) - cjk
+
+    total = (
+        cjk / CJK_CHARS_PER_TOKEN
+        + other / OTHER_CHARS_PER_TOKEN
+    )
+
     return max(
         1,
         int(
-            len(
-                raw
-            )
-            / CHARS_PER_TOKEN
+            total
         ),
     )
 

@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
@@ -44,6 +45,67 @@ PLACEHOLDER_API_KEY = (
 
 PLACEHOLDER_MODEL = (
     "not-configured"
+)
+
+
+# ============================================================
+# 网络：超时与重试
+#
+# openai-python 默认超时长达 600 秒：打到无响应的第三方
+# 端点时，界面会挂住十分钟没有任何反馈。这里收紧为
+# 「连接 30 秒、读 120 秒」。读超时按流式响应的字节间隔
+# 计算，不会打断正常的长回答；连接超时给跨境网络留足
+# 余量。超时错误由 SDK 内建重试（默认 2 次）自动兜底，
+# 全部失败时任务快速报错，而不是无限挂起。
+# 可用环境变量覆盖。
+# ============================================================
+
+def _env_number(
+    name: str,
+    default: float,
+) -> float:
+
+    raw = (
+        os.getenv(
+            name,
+            "",
+        ).strip()
+    )
+
+    if not raw:
+
+        return default
+
+    try:
+
+        value = float(raw)
+
+    except ValueError:
+
+        return default
+
+    return value if value > 0 else default
+
+
+MODEL_CONNECT_TIMEOUT_SECONDS = (
+    _env_number(
+        "MODEL_CONNECT_TIMEOUT_SECONDS",
+        30.0,
+    )
+)
+
+MODEL_READ_TIMEOUT_SECONDS = (
+    _env_number(
+        "MODEL_READ_TIMEOUT_SECONDS",
+        120.0,
+    )
+)
+
+MODEL_MAX_RETRIES = int(
+    _env_number(
+        "MODEL_MAX_RETRIES",
+        2,
+    )
 )
 
 
@@ -138,6 +200,11 @@ def build_runtime():
     new_client = AsyncOpenAI(
         api_key=key,
         base_url=url,
+        timeout=httpx.Timeout(
+            MODEL_READ_TIMEOUT_SECONDS,
+            connect=MODEL_CONNECT_TIMEOUT_SECONDS,
+        ),
+        max_retries=MODEL_MAX_RETRIES,
     )
 
     new_model = OpenAIChatCompletionsModel(

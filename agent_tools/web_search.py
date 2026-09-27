@@ -50,6 +50,10 @@ class SearchTaskState:
 # 这样 HITL 暂停后恢复时也能继续沿用同一任务的搜索预算。
 _SEARCH_TASKS: dict[str, SearchTaskState] = {}
 
+# 注册表容量上限。异常 / 取消路径可能漏掉 end_search_task，
+# 长期运行时按插入顺序淘汰最旧的非活跃任务，防止缓慢累积。
+MAX_SEARCH_TASKS = 200
+
 # 当前正在执行的 task_id。
 # AgentService 会在 Runner 前激活它。
 _CURRENT_TASK_ID: str | None = None
@@ -135,6 +139,22 @@ def begin_search_task(
 
     _SEARCH_TASKS[str(task_id)] = state
     _CURRENT_TASK_ID = str(task_id)
+
+    while len(_SEARCH_TASKS) > MAX_SEARCH_TASKS:
+        oldest = next(
+            (
+                key
+                for key in _SEARCH_TASKS
+                if key != _CURRENT_TASK_ID
+            ),
+            None,
+        )
+        if oldest is None:
+            break
+        _SEARCH_TASKS.pop(
+            oldest,
+            None,
+        )
 
     return get_search_task_status(
         task_id

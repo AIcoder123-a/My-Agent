@@ -493,6 +493,10 @@ KEYBOARD_JS = r"""
             + "?family=Plus+Jakarta+Sans:wght@400;500;600;700"
             + "&family=JetBrains+Mono:wght@400;500;600"
             + "&display=swap";
+        // print  media 技巧：下载期间不阻塞渲染，加载完成后再生效。
+        // 断网 / 国内网络下首屏直接使用系统字体栈，不再等待。
+        link.media = "print";
+        link.onload = function () { link.media = "all"; };
         document.head.appendChild(link);
     })();
 

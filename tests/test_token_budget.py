@@ -44,6 +44,19 @@ class EstimateTests(unittest.TestCase):
     def test_estimate_is_positive_for_tiny_text(self):
         self.assertGreaterEqual(estimate_tokens('a'), 1)
 
+    def test_chinese_is_not_underestimated(self):
+        """回归：旧实现统一按 3 字符/token，中文被低估过半。
+
+        中文实际约 1.3~1.7 字符/token。固定 1200 个汉字，
+        估算必须落在 1000（= 1200 / 1.2）附近，
+        而不是旧算法给出的 400。
+        """
+        self.assertEqual(1000, estimate_tokens('中' * 1200))
+
+    def test_english_estimate_stays_conservative(self):
+        """英文按 3.5 字符/token 折算，仍略高于真实分词。"""
+        self.assertEqual(1000, estimate_tokens('a' * 3500))
+
     def test_item_estimation_counts_all_fields(self):
         small = estimate_item_tokens({'output': 'a' * 300})
         large = estimate_item_tokens({'output': 'a' * 300, 'extra': 'b' * 300})

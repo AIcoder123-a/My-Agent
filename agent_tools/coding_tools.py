@@ -154,6 +154,9 @@ _SENSITIVE_FILE_RE = re.compile(
     r"|(\.npmrc\b)"
     r"|(\.git-credentials)"
     r"|(\.htpasswd)"
+    r"|(\.netrc\b)"
+    r"|((^|[/\\])\.kube[/\\]config\b)"
+    r"|((^|[/\\])\.docker[/\\]config\.json\b)"
     r"|((^|[/\\])\.aws[/\\])"
     r"|((^|[/\\])\.ssh[/\\])"
     r"|((^|[/\\])\.gnupg[/\\])"
@@ -185,11 +188,17 @@ _DANGEROUS_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 下载即执行：iwr ... | iex
+# 下载即执行：iwr ... | iex，以及反向管道 (iwr ...) | iex、
+# certutil/bitsadmin 这类替代下载通道。
 _DOWNLOAD_EXEC_RE = re.compile(
     r"(invoke-expression|iex)\s*[\(\s]+[^)]*"
     r"(invoke-webrequest|iwr|invoke-restmethod|irm|webclient"
-    r"|downloadstring|downloadfile)",
+    r"|downloadstring|downloadfile)"
+    r"|((iwr|irm|invoke-webrequest|invoke-restmethod|curl|wget"
+    r"|certutil|bitsadmin|mshta)[^|;&]{0,400}[|;&]\s*"
+    r"(iex|invoke-expression)\b)"
+    r"|(certutil\s+-urlcache)"
+    r"|(bitsadmin\s+/transfer)",
     re.IGNORECASE,
 )
 
@@ -210,6 +219,54 @@ _WRITE_CMD_RE = re.compile(
 _ABS_PATH_RE = re.compile(
     r"(?:(?<![A-Za-z0-9_\\])([A-Za-z]:[\\/][^\s\"'`|;&]*))"
     r"|(?:(\\\\[^\s\"'`|;&]+))"
+)
+
+# 写 / 删类命令中的相对路径上跳（`..\`、`../`）。
+# cwd 固定在 workspace 内，向上跳一级就必然离开 workspace，
+# 因此不做归一化尝试，直接拒绝 —— 这堵住了旧实现只查
+# 字面绝对路径、`Set-Content ..\gui.py` 直接写穿的洞。
+# 三种形态都拦：句首 / 空白后的 `..`（Remove-Item ..\x）、
+# 路径中段的 `\..\`、以及指向父目录本身的裸 `..`。
+_RELATIVE_ESCAPE_RE = re.compile(
+    r"((?:^|(?<=\s))\.\.(?=[/\\]|\s|$))"
+    r"|([/\\]\.\.(?:[/\\]|\s|$))",
+    re.IGNORECASE,
+)
+
+# 本项目的运行时配置文件：改写 mcp_servers.json 等于
+# 配置「下次打开页面自动拉起的任意进程」，必须由界面操作，
+# 不允许终端触碰。
+_RUNTIME_CONFIG_RE = re.compile(
+    r"(mcp_servers\.json\b)"
+    r"|((^|[/\\])settings\.json\b)"
+    r"|(plugins\.json\b)",
+    re.IGNORECASE,
+)
+
+# 嵌套编码 / 隐藏窗口负载：base64 整段命令能让所有静态
+# 规则失效，宁可整条拒绝（合法开发场景几乎用不到）。
+_ENCODED_PAYLOAD_RE = re.compile(
+    r"(-enc(odedcommand)?\b)"
+    r"|(-windowstyle\s+hidden\b)"
+    r"|(-w\s+hidden\b)",
+    re.IGNORECASE,
+)
+
+# 解释器一行程序里出现破坏性文件操作：
+# `python -c "shutil.rmtree(...)"` 的目标路径不在命令文本里，
+# 路径边界规则看不穿 —— 命中这些特征就拒绝。
+_INTERPRETER_DESTRUCTIVE_RE = re.compile(
+    r"(-c\b|-e\b|-m\b).*("
+    r"shutil\.rmtree|os\.rmdir|os\.remove|os\.unlink|"
+    r"Path\(.+\)\.unlink|WriteAllText|WriteAllBytes|"
+    r"DeleteFile|shutil\.move|os\.rename)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# 裸重定向写入（`echo x > target`）：效果等同写命令，
+# 但动词不在 _WRITE_CMD_RE 里，旧实现完全不设防。
+_REDIRECT_RE = re.compile(
+    r"(?<![<>])>{1,2}\s*[^\s|&]",
 )
 
 # 环境变量中含这些词的，一律不传给子进程
@@ -304,6 +361,33 @@ def audit_shell_command(
             "终端不具备执行破坏性系统操作的权限。"
         )
 
+    hit = _ENCODED_PAYLOAD_RE.search(
+        text
+    )
+
+    if hit:
+
+        raise ValueError(
+            "命令被安全策略拦截："
+            "禁止编码 / 隐藏窗口的嵌套命令"
+            f"（{hit.group(0)!r}）。"
+            "编码负载无法被审计，请直接写出明文命令。"
+        )
+
+    hit = _INTERPRETER_DESTRUCTIVE_RE.search(
+        text
+    )
+
+    if hit:
+
+        raise ValueError(
+            "命令被安全策略拦截："
+            "解释器一行程序中包含文件删除 / 写入操作，"
+            "其目标路径无法被审计。"
+            "请使用受审批和边界保护的内置工具"
+            "（write_file / edit_file）完成。"
+        )
+
     hit = _DOWNLOAD_EXEC_RE.search(
         text
     )
@@ -328,13 +412,54 @@ def audit_shell_command(
             "终端不允许读取密钥、令牌、证书等凭据文件。"
         )
 
-    # 只对「写 / 删 / 移 / 复制」类命令做路径越界检查。
-    # 读取类命令放开绝对路径，否则连 python.exe 都调不动。
+    # 只对「写 / 删 / 移 / 复制」类命令（以及裸重定向）
+    # 做路径越界检查。读取类命令放开绝对路径，
+    # 否则连 python.exe 都调不动。
 
-    if not _WRITE_CMD_RE.search(
-        text
+    is_write = bool(
+        _WRITE_CMD_RE.search(
+            text
+        )
+    )
+
+    is_redirect = bool(
+        _REDIRECT_RE.search(
+            text
+        )
+    )
+
+    if not (
+        is_write
+        or is_redirect
     ):
         return
+
+    hit = _RELATIVE_ESCAPE_RE.search(
+        text
+    )
+
+    if hit:
+
+        raise ValueError(
+            "命令被安全策略拦截："
+            "写入/删除/移动类命令的目标不允许包含 `..` 相对路径"
+            f"（命中 {hit.group(0)!r}）。"
+            "工作目录固定在 workspace 内，向上跳级即越界；"
+            "请改用 workspace 内的相对路径或明确的工作区绝对路径。"
+        )
+
+    hit = _RUNTIME_CONFIG_RE.search(
+        text
+    )
+
+    if hit:
+
+        raise ValueError(
+            "命令被安全策略拦截："
+            f"{hit.group(0)!r} 是本应用的运行时配置，"
+            "不允许通过终端改写（可能被用来注入自动执行的程序）。"
+            "请提示用户在「设置」或「MCP」页面操作。"
+        )
 
     roots = _allowed_write_roots()
 
@@ -457,5 +582,5 @@ async def run_shell_impl(command: str, cwd: str = '.', timeout_seconds: int = 60
 
 @tool(needs_approval=True, failure_error_function=tool_error_to_model)
 async def run_shell(command: str, cwd: str = '.', timeout_seconds: int = 60) -> str:
-    """审批后执行本地 PowerShell 命令，用于代码、测试、Git、数据处理。工作目录位于 workspace，最长 120 秒。终端具有当前系统用户权限，并非文件系统沙箱，必须先说明命令意图；不能通过终端绕过被拒绝的操作。安全边界：读取凭据类文件（.env、id_rsa、*.pem 等）会被拒绝；删除/写入类命令的目标绝对路径必须在 workspace 或临时目录内；系统级破坏性操作（diskpart、reg delete、taskkill、rm -rf 根目录等）与「下载即执行」一律被拒绝。读取工作区外的文件是允许的，但不得用于绕过上述限制。"""
+    """审批后执行本地 PowerShell 命令，用于代码、测试、Git、数据处理。工作目录位于 workspace，最长 120 秒。终端具有当前系统用户权限，并非文件系统沙箱，必须先说明命令意图；不能通过终端绕过被拒绝的操作。安全边界：读取凭据类文件（.env、id_rsa、*.pem 等）会被拒绝；删除/写入类命令的目标绝对路径必须在 workspace 或临时目录内，不允许 `..` 相对路径，也不允许改写本应用的运行时配置（mcp_servers.json、settings.json、plugins.json）；编码命令（-EncodedCommand）、解释器一行程序中的文件删除/写入、「下载即执行」与系统级破坏性操作一律被拒绝。读取工作区外的文件是允许的，但不得用于绕过上述限制。"""
     return await run_shell_impl(command, cwd, timeout_seconds)

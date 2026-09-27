@@ -23,9 +23,14 @@
 插件是**本机 Python 代码**，启用即等同于运行它，
 拥有与小智相同的权限——能读文件、能起进程、能联网。
 只安装你信得过的插件，安装后默认是"未启用"状态。
+安装时会真正加载一次以校验插件可用（这是显式操作）；
+插件列表 / 详情页只做 AST 静态读取元信息，
+**不会执行插件代码**——往 plugins/ 里丢一个文件然后
+刷新页面不再等于运行它。
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import re
@@ -173,8 +178,94 @@ def _collect_tools(module) -> list:
     return [tool for tool in tools if tool is not None]
 
 
-def inspect_plugin(plugin_id: str, path: Path) -> dict:
-    """读取插件元信息。加载失败的插件也要能显示出来。"""
+def _static_metadata(path: Path) -> dict:
+    """AST 静态读取插件元信息，不执行任何插件代码。
+
+    浏览插件列表 / 详情是被动操作，历史实现会为了读几个
+    常量把整个模块 exec 一遍——意味着把恶意 .py 丢进
+    plugins/ 再刷新页面就能触发执行。现在只在「安装」
+    （显式动作）时才真正加载校验。
+
+    局限：PLUGIN_TOOLS 若由函数动态生成，静态只能看到
+    表达式里的名字；这只影响列表展示，安装校验仍以真实
+    加载结果为准。
+    """
+    meta = {
+        "name": "",
+        "desc": "",
+        "version": "",
+        "author": "",
+        "instructions": "",
+        "tools": [],
+        "error": None,
+    }
+
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, UnicodeError, SyntaxError, ValueError) as error:
+        meta["error"] = f"{type(error).__name__}: {error}"
+        return meta
+
+    decorated_functions: list[str] = []
+    for node in tree.body:
+
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for decorator in node.decorator_list:
+                target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                if isinstance(target, ast.Name) and target.id in ("function_tool", "tool"):
+                    decorated_functions.append(node.name)
+                    break
+            continue
+
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+
+        targets = (
+            node.targets if isinstance(node, ast.Assign) else [node.target]
+        )
+        names = [
+            t.id for t in targets if isinstance(t, ast.Name)
+        ]
+        value = node.value
+
+        if value is None or not names:
+            continue
+
+        def _text(node):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                return node.value
+            return ""
+
+        if "PLUGIN_NAME" in names:
+            meta["name"] = _text(value)
+        elif "PLUGIN_DESC" in names:
+            meta["desc"] = _text(value)
+        elif "PLUGIN_VERSION" in names:
+            meta["version"] = _text(value)
+        elif "PLUGIN_AUTHOR" in names:
+            meta["author"] = _text(value)
+        elif "PLUGIN_INSTRUCTIONS" in names:
+            meta["instructions"] = _text(value)
+        elif "PLUGIN_TOOLS" in names and isinstance(value, (ast.List, ast.Tuple)):
+            for element in value.elts:
+                if isinstance(element, ast.Name):
+                    meta["tools"].append(element.id)
+
+    if not meta["tools"]:
+        meta["tools"] = list(decorated_functions)
+
+    return meta
+
+
+def inspect_plugin(plugin_id: str, path: Path, load: bool = False) -> dict:
+    """读取插件元信息。加载失败的插件也要能显示出来。
+
+    load=False（默认）：AST 静态读取，不执行插件代码，
+    供列表 / 详情等被动展示使用。
+    load=True：真正导入一次并读取真实元数据，
+    供安装校验使用 —— 这是对插件代码的显式执行。
+    """
     info = {
         "id": plugin_id,
         "file": str(path.relative_to(BASE_DIR)).replace("\\", "/"),
@@ -193,6 +284,19 @@ def inspect_plugin(plugin_id: str, path: Path) -> dict:
         info["size"] = path.stat().st_size
     except OSError:
         pass
+
+    if not load:
+        meta = _static_metadata(path)
+        if meta["error"]:
+            info["error"] = meta["error"]
+            return info
+        info["name"] = meta["name"] or info["name"]
+        info["desc"] = meta["desc"]
+        info["version"] = meta["version"] or "—"
+        info["author"] = meta["author"] or "—"
+        info["tools"] = meta["tools"]
+        info["instructions"] = bool(meta["instructions"])
+        return info
 
     try:
         module = _load_module(path, plugin_id)
@@ -273,7 +377,7 @@ def install_plugin(source: str) -> tuple[bool, str, str | None]:
     plugin_id = safe_plugin_id(target.name)
 
     try:
-        info = inspect_plugin(plugin_id, target)
+        info = inspect_plugin(plugin_id, target, load=True)
     except BaseException as error:  # noqa: BLE001
         try:
             target.unlink()

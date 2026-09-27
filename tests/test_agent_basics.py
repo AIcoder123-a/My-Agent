@@ -1,6 +1,7 @@
 import asyncio
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch, AsyncMock
@@ -25,7 +26,17 @@ class WorkspaceTests(unittest.TestCase):
     def tearDown(self):
         for item in reversed(self.patches):
             item.stop()
-        self.temp.cleanup()
+        try:
+            self.temp.cleanup()
+        except OSError:
+            # Windows 上文件句柄释放存在短暂延迟（杀软 / 索引服务
+            # 扫描刚写入的大文件），立即清理偶发 WinError 145，
+            # 稍候重试；仍失败则留给系统临时目录清理兜底。
+            time.sleep(0.3)
+            try:
+                self.temp.cleanup()
+            except OSError:
+                pass
 
     def test_path_escape(self):
         with self.assertRaises(ValueError):

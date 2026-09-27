@@ -401,6 +401,14 @@ class AgentService:
             {}
         )
 
+        # 会话级自动放行名单。
+        #
+        # 必须在构造时就初始化：进程启动走的是
+        # load_or_create_session()，不经过 new_session()，
+        # 缺了这一步，首次点「批准并记住」或首次自动放行
+        # 判断就会 AttributeError。
+        self._auto_approve_tools = set()
+
     # ========================================================
     # 基础状态
     # ========================================================
@@ -998,10 +1006,16 @@ class AgentService:
 
         # ------------------------------------------------
         # 复用已有连接
+        #
+        # reconnect=True 时必须跳过：
+        # HITL 暂停路径已经 cleanup() 过这些 Server（会话已死），
+        # 若仍走复用分支，「审批恢复重连」就会变成空操作，
+        # 后续工具调用全部报 Server not initialized。
         # ------------------------------------------------
 
         if (
-            self._mcp_pool
+            not reconnect
+            and self._mcp_pool
             and self._mcp_pool_signature
             == signature
             and all(
@@ -1371,6 +1385,18 @@ class AgentService:
         # 断开后不要让 Agent 在未连接状态下继续暴露 MCP Tools。
         personal_agent.mcp_servers = []
 
+        # 会话已被 cleanup 销毁，连接池里的对象全部失效。
+        # 无论 keep_for_resume 与否都必须清空池子：
+        # keep_for_resume 只保留 self.mcp_servers 里的对象
+        # 供本任务审批恢复时重新 connect；
+        # 若池子还留着它们，下一个 Task 会复用到死会话，
+        # 表现为 Server not initialized。
+        self._mcp_pool = []
+
+        self._mcp_pool_signature = (
+            None
+        )
+
         if not keep_for_resume:
 
             self.mcp_servers = []
@@ -1466,8 +1492,6 @@ class AgentService:
             touch_session(
                 self.session_id
             )
-
-            task_id = self.task_id
 
             # 为当前 Task 创建独立的联网搜索预算。
             # 普通任务最多 4 次；明显深度研究任务最多 6 次。
@@ -2190,10 +2214,14 @@ class AgentService:
     async def stream_approval(
         self,
         approved: bool,
+        remember: bool = False,
     ):
         """
         批准或拒绝当前 Tool Call，
         然后继续流式执行原任务。
+
+        remember=True 时把该工具加入本次会话的
+        自动放行名单（GUI 审批卡上的勾选项）。
         """
 
         with self.lock:

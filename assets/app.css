@@ -1205,6 +1205,12 @@ label[data-testid="block-label"] {
 #chatbot .message-wrap:hover .message-buttons {
     opacity: 1;
 }
+/* 触屏没有 hover：复制按钮常显，否则在移动端事实性消失 */
+@media (hover: none) {
+    #chatbot .message-buttons {
+        opacity: 1;
+    }
+}
 
 #chatbot .message-buttons button,
 #chatbot .message-buttons .icon-button {

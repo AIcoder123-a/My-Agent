@@ -13,6 +13,13 @@ from tool_errors import (
 )
 
 
+# read_notes 的结果直接进入模型上下文。
+# 笔记是 append-only 的文本文件，长期使用后可能积累到
+# 数万字符，全量返回一次就能吃掉大量窗口，
+# 因此返回时按「最新优先」截断，并告知模型如何看全文。
+MAX_READ_NOTES_CHARS = 20000
+
+
 @tool(
     failure_error_function=tool_error_to_model
 )
@@ -140,7 +147,18 @@ def read_notes() -> str:
             },
         )
 
-        return content
+        if len(content) <= MAX_READ_NOTES_CHARS:
+            return content
+
+        # 超长时保留最新的部分；旧笔记仍可分段读取。
+        kept = content[-MAX_READ_NOTES_CHARS:]
+
+        return (
+            f"[笔记共 {len(content)} 字符，"
+            f"以下仅保留最新的 {MAX_READ_NOTES_CHARS} 字符，"
+            "更早的内容请让用户分段查看。]\n\n"
+            + kept
+        )
 
     except Exception as e:
 

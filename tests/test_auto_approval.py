@@ -165,5 +165,114 @@ class AutoApprovalTests(unittest.TestCase):
         self.assertEqual([], service.auto_approve_tools())
 
 
+class StreamApprovalTests(unittest.TestCase):
+    """GUI 批准/拒绝按钮直连 stream_approval 的回归测试。
+
+    曾经的故障：签名只收 approved，方法体却在用 remember，
+    GUI 以 remember= 关键字调用即抛 TypeError，
+    审批主链路 100% 崩溃且无测试覆盖。
+    """
+
+    def drain(self, coro):
+        async def collect():
+            return [item async for item in coro]
+        return asyncio.run(collect())
+
+    def setUp(self):
+        self.patches = [
+            patch('agent_service.write_log'),
+            patch('agent_service.set_task_context'),
+            patch('agent_service.activate_search_task'),
+        ]
+        self.write_log = self.patches[0].start()
+        self.patches[1].start()
+        self.patches[2].start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def _audit_events(self):
+        return [call[0][0].get('event') for call in self.write_log.call_args_list]
+
+    def _attach_resume(self, service, terminal=None):
+        async def _resume(task_id, sink):
+            yield {'event': 'progress'}
+            if terminal is not None:
+                sink['terminal'] = terminal
+        service._resume_after_approval = _resume
+
+    def test_approve_with_remember_kwarg(self):
+        service = make_service()
+        first = FakeInterruption('run_shell')
+        service.pending_interruptions = [first]
+        self._attach_resume(service, terminal={'status': 'completed'})
+
+        events = self.drain(
+            service.stream_approval(approved=True, remember=True)
+        )
+
+        self.assertEqual([first], service.pending_state.approved)
+        self.assertEqual(['run_shell'], service.auto_approve_tools())
+        # remember 的区别只进审计日志，UI 事件流统一是 approval_approved
+        self.assertIn('approval_approved_remembered', self._audit_events())
+        self.assertEqual('completed', events[-1].get('status'))
+
+    def test_approve_without_remember(self):
+        """CLI 路径只传 approved，默认不进放行名单。"""
+        service = make_service()
+        first = FakeInterruption('run_shell')
+        service.pending_interruptions = [first]
+        self._attach_resume(service, terminal={'status': 'completed'})
+
+        events = self.drain(service.stream_approval(approved=True))
+
+        self.assertEqual([first], service.pending_state.approved)
+        self.assertEqual([], service.auto_approve_tools())
+        self.assertTrue(
+            any(e.get('event') == 'approval_approved' for e in events)
+        )
+
+    def test_reject(self):
+        service = make_service()
+        first = FakeInterruption('run_shell')
+        service.pending_interruptions = [first]
+        self._attach_resume(service, terminal={'status': 'completed'})
+
+        events = self.drain(
+            service.stream_approval(approved=False, remember=True)
+        )
+
+        self.assertEqual([first], service.pending_state.rejected)
+        self.assertEqual([], service.auto_approve_tools())
+        self.assertTrue(
+            any(e.get('event') == 'approval_rejected' for e in events)
+        )
+
+    def test_remember_does_not_leak_to_rejected_path(self):
+        """拒绝时即便勾了记住，也不能把工具加进放行名单。"""
+        service = make_service()
+        service.pending_interruptions = [FakeInterruption('run_shell')]
+        self._attach_resume(service)
+
+        self.drain(
+            service.stream_approval(approved=False, remember=True)
+        )
+
+        self.assertEqual([], service.auto_approve_tools())
+
+    def test_init_bootstraps_auto_approve_tools(self):
+        """回归：构造路径不经过 new_session，名单必须在 __init__ 就位。"""
+        with patch(
+            'agent_service.load_or_create_session',
+            return_value=(None, 'bootstrap'),
+        ):
+            service = AgentService()
+
+        self.assertEqual(set(), service._auto_approve_tools)
+        service.set_auto_approve('run_shell', True)
+        self.assertEqual(['run_shell'], service.auto_approve_tools())
+
+
 if __name__ == '__main__':
     unittest.main()
