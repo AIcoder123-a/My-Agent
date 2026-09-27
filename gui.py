@@ -1720,6 +1720,12 @@ with demo:
         outputs=[
             status_box,
             stop_button,
+            send_button,
+            new_session_button,
+            approval_box,
+            approve_button,
+            reject_button,
+            runtime_status,
         ],
         concurrency_id="agent-control",
         concurrency_limit=4,

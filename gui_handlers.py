@@ -807,8 +807,22 @@ def workspace_files() -> list[str]:
 
     return files
 
-def action_feedback(function, message=None, result_index=None):
-    """Show the actual action result without changing event output shapes."""
+# action_feedback 的兜底启发式：从文案猜 toast 级别。
+# 只在调用方没有显式指定 level 时使用；
+# 判错方向是"失败说成提示"，宁可把可疑文案标成警告。
+FAILURE_HINTS = (
+    "失败", "请先", "不存在", "不能为空",
+    "未配置", "没有可", "不正确", "出错",
+    "超时", "无法连接", "被拒绝",
+)
+
+
+def action_feedback(function, message=None, result_index=None, level="auto"):
+    """Show the actual action result without changing event output shapes.
+
+    level: "info" / "warning" 显式指定 toast 级别；
+    "auto"（缺省）按 FAILURE_HINTS 关键词猜测。
+    """
     from functools import wraps
     from inspect import iscoroutinefunction
     def notify(result):
@@ -817,7 +831,10 @@ def action_feedback(function, message=None, result_index=None):
             text = result[result_index] if result_index is not None else result
         if isinstance(text, str) and text.strip():
             text = text.strip()[:220]
-            failed = any(word in text for word in ("失败", "请先", "不存在", "不能为空", "未配置", "没有可", "不正确"))
+            if level == "auto":
+                failed = any(word in text for word in FAILURE_HINTS)
+            else:
+                failed = level == "warning"
             (gr.Warning if failed else gr.Info)(text)
         return result
     if iscoroutinefunction(function):
@@ -1430,6 +1447,11 @@ async def render_service_stream(
 
     stop_enabled = True
 
+    # 任务是否已到终态（完成 / 失败 / 已停止）。
+    # 由事件的结构化 status 字段驱动并跨事件保持，
+    # 不再匹配中文 UI 文案 —— 文案一改控制流就变的事故不能再有。
+    task_finished = False
+
     # --------------------------------------------------------
     # UI Streaming 节流
     # --------------------------------------------------------
@@ -1941,7 +1963,8 @@ async def render_service_stream(
             )
 
             status_text = (
-                "等待你的批准"
+                "等待你的批准，"
+                "可点「停止」放弃任务"
             )
 
             remaining = (
@@ -2193,15 +2216,6 @@ async def render_service_stream(
             == "approval_required"
         )
 
-        task_finished = (
-            status_text
-            in {
-                "任务已完成",
-                "任务执行失败",
-                "已停止当前任务",
-            }
-        )
-
         # ====================================================
         # 停止按钮
         #
@@ -2212,18 +2226,24 @@ async def render_service_stream(
         # ====================================================
 
         if (
-            terminal_status
-            or event_code
+            event_code
             == "task_cancelled"
+            or (
+                terminal_status
+                and terminal_status
+                != "approval_required"
+            )
         ):
 
             stop_enabled = False
 
-        # 等待审批时不提供“停止”，
-        # 此时该用的是审批卡里的“放弃”。
+            task_finished = True
+
+        # approval_required 也是终态（本条流到此结束），
+        # 但任务本身没有结束——停止按钮保持可用，
+        # 点它就是"放弃等待审批的任务"。
         can_stop = (
             stop_enabled
-            and not waiting_approval
         )
 
         can_send = (
@@ -2566,13 +2586,22 @@ async def restore_view_ui():
                 f"```text\n{json_text(item.arguments)}\n```",
                 True,
             )
-        status = "等待你的批准" if pending else ("任务运行中，可点击停止" if running else "就绪")
+        status = (
+            "等待你的批准，可点「停止」放弃任务"
+            if pending
+            else (
+                "任务运行中，可点击停止"
+                if running
+                else "就绪"
+            )
+        )
         yield (
             history, service.get_session_id(), current_task_text(),
             conversation_dropdown_state(), current_conversation_title(), approval,
             approval_button_state(bool(pending)), approval_button_state(bool(pending)),
             button_state(not (running or pending)), button_state(not (running or pending)),
-            button_state(running and not pending), status, runtime_status_markdown(),
+            button_state(bool(pending) or (running and not pending)), status,
+            runtime_status_markdown(),
             task_plan_markdown(), context_badge_text(),
         )
         if not running:
@@ -4717,22 +4746,59 @@ def tools_overview_markdown() -> str:
 
 def stop_task():
     """
-    请求停止当前正在运行的任务。
+    请求停止当前正在运行的任务，
+    或放弃当前等待审批的任务。
 
     点完立刻把按钮自己置灰，
     一是避免重复点击，
     二是给即时反馈——真正停下还需要一两秒。
 
-    空闲时不会被误触发，
-    但也不该假装"正在停止"，
-    所以这里如实说明。
+    等待审批时点「停止」= 放弃任务：
+    「拒绝」会把原因交回模型换个方案继续跑，
+    想直接结束的用户走这里。
+    放弃路径上没有任何流事件会再刷新界面，
+    所以返回值同时恢复发送 / 新任务按钮、
+    清掉审批卡与运行状态徽章。
     """
+
+    if service.pending_interruptions:
+
+        import asyncio
+
+        try:
+
+            message = asyncio.run(
+                service.abandon_pending_approval()
+            )
+
+        except Exception as error:
+
+            message = (
+                f"放弃任务时出错：{error}"
+            )
+
+        return (
+            message,
+            button_state(False),
+            button_state(True),
+            button_state(True),
+            approval_view(),
+            approval_button_state(False),
+            approval_button_state(False),
+            runtime_status_markdown(),
+        )
 
     if not service.running:
 
         return (
             "当前没有正在运行的任务。",
             button_state(False),
+            button_state(True),
+            button_state(True),
+            approval_view(),
+            approval_button_state(False),
+            approval_button_state(False),
+            runtime_status_markdown(),
         )
 
     service.request_cancel()
@@ -4740,6 +4806,12 @@ def stop_task():
     return (
         "正在停止…",
         button_state(False),
+        button_state(False),
+        button_state(False),
+        approval_view(),
+        approval_button_state(False),
+        approval_button_state(False),
+        runtime_status_markdown(),
     )
 
 # ============================================================

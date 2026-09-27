@@ -12,9 +12,12 @@ from threading import RLock
 from time import perf_counter
 
 from agents import (
+    MaxTurnsExceeded,
     Runner,
     RunConfig,
 )
+
+import openai
 
 from app_agents.personal_agent import (
     personal_agent,
@@ -747,7 +750,7 @@ class AgentService:
         这里只收集最终状态。
         """
 
-        return asyncio.run(
+        result = asyncio.run(
             self._collect_terminal_result(
                 self.stream_task(
                     user_input
@@ -755,11 +758,15 @@ class AgentService:
             )
         )
 
+        self._teardown_mcp_pool_for_cli()
+
+        return result
+
     def approve_current(
         self,
     ) -> dict:
 
-        return asyncio.run(
+        result = asyncio.run(
             self._collect_terminal_result(
                 self.stream_approval(
                     approved=True
@@ -767,17 +774,62 @@ class AgentService:
             )
         )
 
+        self._teardown_mcp_pool_for_cli()
+
+        return result
+
     def reject_current(
         self,
     ) -> dict:
 
-        return asyncio.run(
+        result = asyncio.run(
             self._collect_terminal_result(
                 self.stream_approval(
                     approved=False
                 )
             )
         )
+
+        self._teardown_mcp_pool_for_cli()
+
+        return result
+
+    def _teardown_mcp_pool_for_cli(
+        self,
+    ) -> None:
+        """
+        CLI 路径专用：每次调用都 asyncio.run() 新建事件循环，
+        而连接池是为 GUI 的单事件循环设计的——
+        stdio transport / anyio 原语绑定创建时的循环，
+        跨循环复用必然报错。所以 CLI 下任务一结束就彻底断开，
+        下个命令重新连接（慢一点，但正确）。
+        """
+
+        if not (
+            self._mcp_pool
+            or self.mcp_servers
+        ):
+
+            return
+
+        self._mcp_pool = []
+
+        self._mcp_pool_signature = (
+            None
+        )
+
+        try:
+
+            asyncio.run(
+                self._disconnect_mcp_servers(
+                    keep_for_resume=False
+                )
+            )
+
+        except Exception:
+
+            # 清理失败不掩盖任务本身的结果。
+            pass
 
     async def _collect_terminal_result(
         self,
@@ -1842,6 +1894,71 @@ class AgentService:
         self._cancel_requested = True
         from agent_tools.coding_tools import cancel_active_shells
         cancel_active_shells()
+
+    async def abandon_pending_approval(
+        self,
+    ) -> str:
+        """
+        放弃当前等待审批的任务。
+
+        「拒绝」会把拒绝原因交回模型继续跑（换个方案）；
+        用户真正想要的往往是"什么都不做，直接结束"，
+        这是两条不同的路径。等待审批期间停止按钮可用，
+        走的就是这里：清掉 pending 状态、断开并清空 MCP、
+        结束用量记账，让界面立即回到就绪。
+        """
+
+        with self.lock:
+
+            if not self.pending_interruptions:
+
+                return (
+                    "当前没有等待审批的操作。"
+                )
+
+            tool_names = [
+                (item.name or "unknown")
+                for item in (
+                    self.pending_interruptions
+                )
+            ]
+
+            task_id = self.task_id
+
+        write_log(
+            {
+                "event":
+                    "approval_abandoned",
+                "task_id":
+                    task_id,
+                "tools":
+                    tool_names,
+                "time":
+                    now_text(),
+            }
+        )
+
+        try:
+
+            self._finish_task_accounting()
+
+        except Exception:
+
+            # 记账失败不应阻止放弃任务。
+            pass
+
+        # keep_for_resume=False：任务已终止，
+        # 会话销毁、连接池清空（该方法内已处理）。
+        await self._disconnect_mcp_servers(
+            keep_for_resume=False
+        )
+
+        self._clear_pending()
+
+        return (
+            "已放弃等待审批的任务，"
+            "已完成的工作保留在会话中。"
+        )
 
     # ========================================================
     # 会话内自动放行
@@ -2998,6 +3115,99 @@ class AgentService:
     # Error
     # ========================================================
 
+    def _friendly_error_message(
+        self,
+        error: Exception,
+    ) -> str:
+        """
+        把常见异常翻译成用户能直接行动的提示。
+
+        完整的异常类型与文本已经在 _handle_failure 里
+        写进审计日志；用户界面上只给可操作的信息，
+        不再把内部路径、base_url 这类细节甩到脸上。
+        """
+
+        if isinstance(
+            error,
+            MaxTurnsExceeded,
+        ):
+
+            return (
+                "任务在限定步数内没有完成"
+                "（防止模型无限循环的保护机制）。"
+                "可以选择：在「设置与外观 → 智能体」里调高最大步数后重试；"
+                "或者把大任务拆成几步分次完成。"
+            )
+
+        if isinstance(
+            error,
+            openai.APITimeoutError,
+        ):
+
+            return (
+                "模型接口请求超时。"
+                "通常是网络波动或接口方响应过慢，请稍后重试；"
+                "若反复出现，请检查「设置与外观 → 模型」里的接口地址。"
+            )
+
+        if isinstance(
+            error,
+            openai.APIConnectionError,
+        ):
+
+            return (
+                "无法连接到模型接口。"
+                "请检查本机网络，以及「设置与外观 → 模型」里的接口地址是否可达。"
+            )
+
+        if isinstance(
+            error,
+            openai.RateLimitError,
+        ):
+
+            return (
+                "模型接口触发限流或额度不足。"
+                "请稍后重试，或到接口方控制台确认用量与配额。"
+            )
+
+        if isinstance(
+            error,
+            openai.AuthenticationError,
+        ):
+
+            return (
+                "模型接口认证失败。"
+                "请到「设置与外观 → 模型」检查 API Key 是否正确。"
+            )
+
+        if isinstance(
+            error,
+            openai.NotFoundError,
+        ):
+
+            return (
+                "模型接口返回 404。"
+                "通常是模型名称或接口地址不对，"
+                "请到「设置与外观 → 模型」逐项核对。"
+            )
+
+        if isinstance(
+            error,
+            openai.PermissionDeniedError,
+        ):
+
+            return (
+                "模型接口拒绝了本次访问（403）。"
+                "请确认 API Key 对该模型有权限、账户状态正常。"
+            )
+
+        text = (
+            f"{type(error).__name__}: "
+            f"{error}"
+        )
+
+        return text[:300]
+
     def _handle_failure(
         self,
         error: Exception,
@@ -3040,8 +3250,9 @@ class AgentService:
             "status": "error",
             "task_id": task_id,
             "message": (
-                f"{type(error).__name__}: "
-                f"{error}"
+                self._friendly_error_message(
+                    error
+                )
             ),
             "time": now_text(),
         }
